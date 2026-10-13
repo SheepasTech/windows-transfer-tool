@@ -1,0 +1,30 @@
+# Secrets - generated locally, never commit
+credentials.json
+credentials.*.json
+!credentials.example.json
+*.secret
+.env
+.env.*
+
+# Exports, markers and logs produced by the tool
+MigrationExport/
+Migration/
+*.log
+*.reg
+*.pow
+wifi/
+apps-report.csv
+apps.json
+prep-state.json
+pair.json
+bound.json
+done.json
+manifest.json
+wallpaper.*
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
