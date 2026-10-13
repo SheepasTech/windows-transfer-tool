@@ -10,7 +10,7 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 - [The tool itself](#the-tool-itself)
 
 ## Network and security
-
+ 
 ### The old PC exposes its admin share
 **What happens.** Stage S3 enables File and Printer Sharing, makes Public networks Private, and sets `LocalAccountTokenFilterPolicy=1`. Until the new PC binds in S4, anyone on the same subnet who knows the old PC's Windows password can open `\\oldpc\C$` with full access. After binding, the firewall rules are limited to the new PC's address.
 **Why.** The admin share is the only share that exists on every Windows edition without creating one, and it reaches every folder a user may have redirected.
