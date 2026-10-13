@@ -33,7 +33,6 @@ function Test-Admin {
 
 Write-Host ''
 Write-Host "  Windows Transfer Tool - bootstrap  ($Repo @ $Ref)" -ForegroundColor White
-if ($Repo -like 'SheepasTech/*') { Write-Host '  (bootstrap.ps1 still has the SheepasTech placeholder - set $env:WTT_REPO or edit the script)' -ForegroundColor Yellow }
 
 # ---- 1. role ---------------------------------------------------------------
 $role = $env:WTT_ROLE

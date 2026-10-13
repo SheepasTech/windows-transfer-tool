@@ -46,7 +46,7 @@ flowchart TD
     subgraph S1["S1 Preflight"]
         direction TB
         P1{"Elevated?"} -- no --> X1[/"stop: run as administrator"/]
-        P1 -- yes --> P2{"Explorer SheepasTech = this user?"}
+        P1 -- yes --> P2{"Explorer owner = this user?"}
         P2 -- no --> X2[/"stop: wrong account elevated"/]
         P2 -- yes --> P3["keep PC awake<br/>warn if known folders are in OneDrive"]
     end
@@ -109,7 +109,7 @@ flowchart TD
         direction TB
         P1{"Elevated?"} -- no --> P1w["warn: Wi-Fi, winget and some settings need it"]
         P1 -- yes --> P2
-        P1w --> P2{"Explorer SheepasTech = this user?"}
+        P1w --> P2{"Explorer owner = this user?"}
         P2 -- no --> X1[/"stop: wrong account elevated"/]
         P2 -- yes --> P3["keep PC awake, check winget"]
     end

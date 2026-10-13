@@ -81,7 +81,7 @@ Stage S4 on the old PC writes a salted hash of a random six-digit code into the 
 | `WTT_ROLE=Source\|Destination\|Download` | `-Mode Source\|Destination` | both | Skip the role question. `Download` only fetches the tool |
 | `WTT_DRYRUN=1` | `-DryRun` | new | Show what would be copied; change nothing |
 | `WTT_REF=<tag or sha>` | | both | Pin a version instead of `main` |
-| `WTT_REPO=<SheepasTech/repo>` | | both | Use a fork |
+| `WTT_REPO=<owner/repo>` | | both | Use a fork |
 | | `-OldPCIP <ip>` | new | Skip the IP prompt |
 | | `-PairCode 123456` | new | Skip the pairing-code prompt |
 | | `-Select All` / `-Select f_docs,s_taskbar` | new | Skip the menu (item keys are in the `$Catalog` at the top of the script) |

@@ -41,7 +41,7 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 **Instead.** If both forms fail, create a local administrator account on the old PC for the duration of the transfer and use that.
 
 ### Elevating with another account migrates the wrong profile
-**What happens.** If a standard user elevates by typing a different administrator's password, `HKCU` and `%USERPROFILE%` inside that window belong to the administrator. The tool compares the SheepasTech of Explorer with the current user and stops when they differ.
+**What happens.** If a standard user elevates by typing a different administrator's password, `HKCU` and `%USERPROFILE%` inside that window belong to the administrator. The tool compares the owner of Explorer with the current user and stops when they differ.
 **Instead.** Sign in as the user to migrate and give that user administrator rights for the transfer (Settings > Accounts > Other users > Change account type), then remove them afterwards.
 
 ### Different user names on the two PCs
@@ -73,7 +73,7 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 **What happens.** Open files (Outlook `.pst`, databases) fail with "sharing violation"; paths over 260 characters may fail.
 **Instead.** Close Outlook and other apps on the old PC before S2. Rerun just that item afterwards; the robocopy log names every failed file.
 
-### Permissions and SheepasTechship
+### Permissions and ownership
 **What happens.** Files are copied with data, attributes and timestamps (`/COPY:DAT`), not with their ACLs. They inherit the new PC's profile permissions.
 **Why.** Old-PC ACLs reference SIDs that do not exist on the new PC.
 **Instead.** Nothing to do for personal files. For `.ssh` keys the inherited profile permissions are what OpenSSH expects.
