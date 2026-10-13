@@ -9,7 +9,7 @@ A staged, menu-driven PowerShell tool that moves a Windows user's files, apps an
 On **both** PCs, open PowerShell (Start, type `powershell`, Enter) and paste:
 
 ```powershell
-irm https://raw.githubusercontent.com/OWNER/windows-transfer-tool/main/bootstrap.ps1 | iex
+irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 ```
 
 The bootstrap asks whether the PC is the **old** one (source) or the **new** one (destination), requests administrator rights, downloads the tool and starts it. Do the old PC first: it shows its IP address and a **pairing code**. Enter both on the new PC, choose what to transfer, and the two PCs proceed on their own. The old PC reverts its sharing changes when the new PC reports it is done.
@@ -17,12 +17,10 @@ The bootstrap asks whether the PC is the **old** one (source) or the **new** one
 To preview on the new PC without changing anything:
 
 ```powershell
-$env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/OWNER/windows-transfer-tool/main/bootstrap.ps1 | iex
+$env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 ```
 
 Offline alternative: copy the folder to both PCs and double-click `Start-Migration.cmd`, or from an elevated PowerShell run `.\Migrate-Windows.ps1 -Mode Source` / `-Mode Destination`.
-
-> Replace `OWNER` with the GitHub account that hosts this repository. Until then, set `$env:WTT_REPO='you/windows-transfer-tool'` before the one-liner.
 
 ## The process at a glance
 
@@ -83,7 +81,7 @@ Stage S4 on the old PC writes a salted hash of a random six-digit code into the 
 | `WTT_ROLE=Source\|Destination\|Download` | `-Mode Source\|Destination` | both | Skip the role question. `Download` only fetches the tool |
 | `WTT_DRYRUN=1` | `-DryRun` | new | Show what would be copied; change nothing |
 | `WTT_REF=<tag or sha>` | | both | Pin a version instead of `main` |
-| `WTT_REPO=<owner/repo>` | | both | Use a fork |
+| `WTT_REPO=<SheepasTech/repo>` | | both | Use a fork |
 | | `-OldPCIP <ip>` | new | Skip the IP prompt |
 | | `-PairCode 123456` | new | Skip the pairing-code prompt |
 | | `-Select All` / `-Select f_docs,s_taskbar` | new | Skip the menu (item keys are in the `$Catalog` at the top of the script) |

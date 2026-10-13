@@ -3,7 +3,7 @@
 
   Run on BOTH PCs from a PowerShell window (it asks for administrator rights itself):
 
-    irm https://raw.githubusercontent.com/OWNER/windows-transfer-tool/main/bootstrap.ps1 | iex
+    irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 
   What it does
     1. Asks whether this PC is the OLD one (source) or the NEW one (destination).
@@ -17,11 +17,11 @@
     $env:WTT_DRYRUN = '1'                                     destination: preview only
     $env:WTT_REF    = 'v0.2.0' | '<commit sha>'               pin a version (default: main)
     $env:WTT_REPO   = 'you/windows-transfer-tool'             use a fork
-  Example:  $env:WTT_ROLE='Destination'; $env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/OWNER/windows-transfer-tool/main/bootstrap.ps1 | iex
+  Example:  $env:WTT_ROLE='Destination'; $env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 #>
 $ErrorActionPreference = 'Stop'
 
-$Repo       = if ($env:WTT_REPO) { $env:WTT_REPO } else { 'OWNER/windows-transfer-tool' }
+$Repo       = if ($env:WTT_REPO) { $env:WTT_REPO } else { 'SheepasTech/windows-transfer-tool' }
 $Ref        = if ($env:WTT_REF)  { $env:WTT_REF }  else { 'main' }
 $Base       = if ($env:WTT_BASE) { $env:WTT_BASE } else { "https://raw.githubusercontent.com/$Repo/$Ref/" }
 $InstallDir = Join-Path $env:LOCALAPPDATA 'WindowsTransferTool'
@@ -33,7 +33,7 @@ function Test-Admin {
 
 Write-Host ''
 Write-Host "  Windows Transfer Tool - bootstrap  ($Repo @ $Ref)" -ForegroundColor White
-if ($Repo -like 'OWNER/*') { Write-Host '  (bootstrap.ps1 still has the OWNER placeholder - set $env:WTT_REPO or edit the script)' -ForegroundColor Yellow }
+if ($Repo -like 'SheepasTech/*') { Write-Host '  (bootstrap.ps1 still has the SheepasTech placeholder - set $env:WTT_REPO or edit the script)' -ForegroundColor Yellow }
 
 # ---- 1. role ---------------------------------------------------------------
 $role = $env:WTT_ROLE
