@@ -9,14 +9,18 @@ A staged, menu-driven PowerShell tool that moves a Windows user's files, apps an
 On **both** PCs, open PowerShell (Start, type `powershell`, Enter) and paste:
 
 ```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
 irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 ```
+
+`-Scope Process` lifts the script policy for this PowerShell window only. It is not saved and reverts when you close the window.
 
 The bootstrap asks whether the PC is the **old** one (source) or the **new** one (destination), requests administrator rights, downloads the tool and starts it. Do the old PC first: it shows its IP address and a **pairing code**. Enter both on the new PC, choose what to transfer, and the two PCs proceed on their own. The old PC reverts its sharing changes when the new PC reports it is done.
 
 To preview on the new PC without changing anything:
 
 ```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
 $env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 ```
 
