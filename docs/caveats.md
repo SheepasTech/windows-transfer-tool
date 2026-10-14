@@ -5,6 +5,7 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 - [Network and security](#network-and-security)
 - [Accounts and sign-in](#accounts-and-sign-in)
 - [Files](#files)
+- [Flash drive or external SSD](#flash-drive-or-external-ssd)
 - [Apps](#apps)
 - [Windows settings](#windows-settings)
 - [The tool itself](#the-tool-itself)
@@ -106,6 +107,53 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 **What happens.** Every file needs its own data connection (and, for FTPS, its own TLS handshake). The mirror runs up to eight connections in parallel (`-Threads`), which hides most of it, but a folder of tens of thousands of tiny files is still slower than robocopy over SMB. A failed file is retried three times from its start; there is no resume inside a file.
 **Instead.** Rerun after an interruption: files that are already complete are skipped. Use `-Transport Smb` for huge trees of small files.
 
+## Flash drive or external SSD
+
+### Only a drive with the WTT-Transfer folder is used
+**What happens.** The tool looks at external drives only (removable media, or a disk on a USB bus), never the system drive, and uses one only if its root contains a folder named `WTT-Transfer`. Without it the old PC step lists the external drives it found and offers to create the empty folder on the letter you type; the new PC step waits for you to plug the right drive in. Everything is written, read and deleted inside that folder.
+**Why.** A tool that copies tens of gigabytes should not guess which disk may be written to.
+**Instead.** Create the folder yourself, or run `.\Migrate-Windows.ps1 -PrepareDrive D:`. A folder that is itself a junction or link is refused, and so is a drive that holds one inside the folder when the tool is about to empty it.
+
+### Some external drives are not recognised as external
+**What happens.** Windows reports a drive as external when it is removable or sits on a USB bus. An external SSD or hard drive in a Thunderbolt or NVMe enclosure, or behind a bridge that presents itself as SATA, may be reported as an ordinary internal disk and is then not offered.
+**Why.** The tool has no other reliable way to tell an external disk from a second internal one, and an internal data disk should not be offered by accident.
+**Instead.** Name it with `-Drive X:` (and `-PrepareDrive X:` the first time). The folder is still required, and the system drive is still refused.
+
+### The drive holds your files and your Wi-Fi passwords in clear text
+**What happens.** `WTT-Transfer\pkg\wifi` contains every saved Wi-Fi key in clear text and `data` holds copies of your personal files, for as long as the transfer is on the drive. Nothing encrypts it unless you do.
+**Why.** `netsh wlan export profile key=clear` is the only way to carry Wi-Fi keys between PCs, and a plain drive has no access control.
+**Instead.** Turn on BitLocker To Go for the drive (right-click it in Explorer) before the transfer if it could be lost or stolen, keep it with you, untick "Saved Wi-Fi networks" in the new PC's menu if you would rather type them, and let the new PC empty the folder at the end (it asks, default no). To do it by hand, delete everything inside `WTT-Transfer`.
+
+### FAT32 cannot hold files over 4 GB
+**What happens.** On a FAT32 drive a single file above 4 GB fails to copy. The tool warns when it sees FAT32, and the item ends as WARN with the file named in the log.
+**Why.** It is a limit of the file system.
+**Instead.** Format the drive as exFAT or NTFS first (this erases it), or copy those few files another way. FAT and exFAT also keep file times with 2-second precision, so the tool adds `/FFT` to robocopy there; a repeat run then does not copy everything again.
+
+### The size estimate is a list-only count with some headroom
+**What happens.** Before copying, every file item is measured with a list-only `robocopy` and the menu shows the sizes. The selection must fit the free space plus 2% plus 300 MB, or you choose again. Files that are online-only in OneDrive count with their full size and are downloaded to this PC while they are copied.
+**Why.** The real copy can differ slightly: files change between measuring and copying, and the package and logs need room too.
+**Instead.** Leave some free space on the drive, close apps that write to the folders, and untick OneDrive folders if the new PC signs in to the same OneDrive.
+
+### The new PC only gets what the old PC copied
+**What happens.** With a drive the old PC decides which file items are copied. The new PC's menu hides file items that are not on the drive, and shows the settings items, which live in the small package that is always written.
+**Why.** There is no live connection to fetch anything else from.
+**Instead.** Run the old PC step again for the missing folders (finished transfers can be updated: it asks whether to replace, and "continue" is offered after an interruption), or copy them by hand ([manual.md](manual.md#copying-with-a-drive-by-hand)).
+
+### An interrupted copy
+**What happens.** `transfer.json` stays `incomplete` if the old PC step is stopped, the drive is pulled out or the PC sleeps. The new PC refuses such a drive unless you answer yes to "use it anyway".
+**Instead.** Plug the drive back in and run the old PC step again; answer yes to "Continue it?". Files that are already complete are skipped. Eject the drive with Safely Remove Hardware after the last copy: the tool asks Windows to flush the drive's write cache at the end, but only a proper eject guarantees it, and an external SSD set to "better performance" may hold writes for a while.
+
+### Drive letters do not matter, a PC with the same name does
+**What happens.** Nothing on the drive refers to a drive letter, so it can be D: on one PC and F: on the other. If the drive was written by a PC with the new PC's own name, the tool stops and asks, because that usually means you are on the old PC.
+**Instead.** Answer yes only if the two PCs really share a name (for example after a reinstall on the same hardware).
+
+### More than one transfer drive
+**What happens.** If two drives both have the folder, the tool asks which one to use. On the new PC only drives that also hold a `transfer.json` count.
+**Instead.** Pick by number, or give the letter with `-Drive`.
+
+### Files in use, junctions and metadata
+The old PC copies with `robocopy`, so the usual limits apply: files that are open (an Outlook `.pst`, a running browser's profile) end as WARN, junctions and links are skipped (`/XJ`), and ACLs are not copied (`/COPY:DAT`). Attributes survive on NTFS, FAT32 and exFAT. Close Outlook, browsers and Sticky Notes on the old PC first: the old PC step reminds you for the items that need it and does not close anything itself.
+
 ## Apps
 
 ### winget only knows some apps
@@ -169,8 +217,12 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 
 ## The tool itself
 
-### Tested on loopback, not yet between two PCs
-The FTP/FTPS server and client are tested against each other and against `curl` on one machine in Windows PowerShell 5.1 and PowerShell 7: login and lockout, listing, hidden files, refused paths (parent folders, junctions, device names, alternate streams), uploads, pinning, resume of a second run, locked files, parallel copies. The script's stages around them are exercised with stand-ins for the firewall and prompts. **Not yet exercised: creating the Windows Firewall rule (needs an elevated window) and a real run between two PCs.** Use `-DryRun` first, and keep the old PC until the new one is verified.
+### Tested on one machine, not yet between two PCs
+The FTP/FTPS server and client are tested against each other and against `curl` on one machine in Windows PowerShell 5.1 and PowerShell 7: login and lockout, listing, hidden files, refused paths (parent folders, junctions, device names, alternate streams), uploads, pinning, resume of a second run, locked files, parallel copies. The script's stages around them are exercised with stand-ins for the firewall and prompts.
+
+The drive transport is tested in both PowerShell versions against stand-in drive folders (an NTFS one and a FAT32 one): preparing a drive, refusing internal drives, junction markers and drives without the folder, the path guards, emptying, size measuring, the space check, the whole old PC flow including continue and replace, and the new PC's detection, menu filtering, restore and cleanup. The two USB sticks that were plugged in were only read: detection and the refusal to use a drive without the folder were checked on them, and nothing was written to them.
+
+**Not yet exercised: writing to a real USB drive, creating the Windows Firewall rule (needs an elevated window) and a real run between two PCs.** Use `-DryRun` first, and keep the old PC until the new one is verified.
 
 ### The first start compiles a small C# file
 **What happens.** `Add-Type` compiles `lib/WttFtp.cs` when FTP or FTPS is used, which takes a second or two and needs the file next to the script. It fails where PowerShell runs in Constrained Language Mode (AppLocker or Windows Defender Application Control policies on managed PCs).

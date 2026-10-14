@@ -4,6 +4,7 @@ Every item the tool offers, as manual steps. Useful when an item failed, when yo
 
 Throughout, `OLD` is the old PC's name or IP and `C:\Users\Old` / `C:\Users\New` are the two profile folders. The `robocopy` commands below read from the old PC over SMB; if you use the tool's FTP service instead, fetch the same folders with an FTP client (see the next section).
 
+- [Copying with a drive by hand](#copying-with-a-drive-by-hand)
 - [Using the FTP service by hand](#using-the-ftp-service-by-hand)
 - [Sharing by hand](#sharing-by-hand)
 - [Reverting by hand](#reverting-by-hand)
@@ -11,6 +12,60 @@ Throughout, `OLD` is the old PC's name or IP and `C:\Users\Old` / `C:\Users\New`
 - [Apps and app data](#apps-and-app-data)
 - [Windows settings](#windows-settings)
 - [Any other app](#any-other-app)
+
+## Copying with a drive by hand
+
+You do not need the tool for a drive transfer: it is two `robocopy` runs. The folder layout below is the one the tool uses, which keeps the two ways interchangeable for the file parts. The tool's new-PC step additionally needs `transfer.json` and the `pkg` package, which only the tool writes, so a drive filled purely by hand is restored by hand too.
+
+Prepare the drive once. Create the folder `WTT-Transfer` in the root of an external drive (here `D:`), in Explorer or with:
+
+```powershell
+New-Item -ItemType Directory D:\WTT-Transfer
+```
+
+Check there is room first. This lists how much `robocopy` would copy for a folder without copying anything (read the `Bytes` line), and `Get-PSDrive D` shows the free space:
+
+```powershell
+robocopy "C:\Users\Old\Documents" "$env:TEMP\nothing" /L /E /XJ /BYTES /NFL /NDL /NJH /NP /R:0 /W:0 /XF desktop.ini Thumbs.db
+Get-PSDrive D | Select-Object Used, Free
+```
+
+**Old PC.** One `robocopy` per folder, into `D:\WTT-Transfer\data`. `/E` copies subfolders (empty ones too), `/XJ` skips junctions, `/XO` skips files that are already there and newer, `/MT:8` uses eight threads. Add `/FFT` if the drive is FAT32 or exFAT, otherwise every repeat run copies everything again. FAT32 cannot hold a file over 4 GB.
+
+```powershell
+$dst = 'D:\WTT-Transfer\data'
+robocopy "C:\Users\Old\Desktop"   "$dst\known-Desktop"   /E /XJ /XO /MT:8 /R:2 /W:3 /XF desktop.ini Thumbs.db /LOG+:D:\WTT-Transfer\copy.log
+robocopy "C:\Users\Old\Documents" "$dst\known-Documents" /E /XJ /XO /MT:8 /R:2 /W:3 /XF desktop.ini Thumbs.db /LOG+:D:\WTT-Transfer\copy.log
+robocopy "C:\Users\Old\Pictures"  "$dst\known-Pictures"  /E /XJ /XO /MT:8 /R:2 /W:3 /XF desktop.ini Thumbs.db /LOG+:D:\WTT-Transfer\copy.log
+# other profile folders keep their relative path under data\profile
+robocopy "C:\Users\Old\AppData\Roaming\Code\User" "$dst\profile\AppData\Roaming\Code\User" /E /XJ /XO /XD globalStorage workspaceStorage History
+# single files from the profile root
+robocopy "C:\Users\Old" "$dst\profile" .gitconfig .npmrc /R:1 /W:1
+```
+
+Settings travel as `.reg` exports and a few files; the commands are in the sections below ([Windows settings](#windows-settings) and the ones before it): run the `reg export` lines on the old PC into `D:\WTT-Transfer\pkg\reg`, and the `reg import` lines on the new PC from there. Mind that the exports contain your Wi-Fi passwords in clear text if you include `netsh wlan export profile key=clear`.
+
+If a known folder was moved (for example Documents inside OneDrive), copy from its real path, which this shows:
+
+```powershell
+Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+```
+
+Eject the drive with Safely Remove Hardware, plug it into the new PC and copy back the other way:
+
+```powershell
+$src = 'D:\WTT-Transfer\data'
+robocopy "$src\known-Documents" "$env:USERPROFILE\Documents" /E /XJ /XO /MT:8 /R:2 /W:3 /LOG+:"$env:USERPROFILE\migrate.log"
+robocopy "$src\profile\AppData\Roaming\Code\User" "$env:APPDATA\Code\User" /E /XJ /XO
+```
+
+When you are done, delete what is inside `D:\WTT-Transfer` (it holds personal files and possibly Wi-Fi keys). To do it safely, empty only that folder:
+
+```powershell
+Get-ChildItem D:\WTT-Transfer -Force | Remove-Item -Recurse -Force
+```
+
+Check first that `Get-ChildItem D:\WTT-Transfer -Force -Recurse | Where-Object Attributes -match ReparsePoint` prints nothing: older Windows PowerShell can follow a junction while deleting recursively.
 
 ## Using the FTP service by hand
 
@@ -82,6 +137,8 @@ Remove-LocalUser -Name WTT-manual
 ## Reverting by hand
 
 If the tool's window was closed before stage S6 and `Migrate-Windows.ps1 -Cleanup` is not available:
+
+**Drive.** Nothing was opened on the old PC, so there is nothing to revert. To clear the drive, empty the `WTT-Transfer` folder on it (see [Copying with a drive by hand](#copying-with-a-drive-by-hand)); the folder itself can stay, it is what makes the drive a transfer drive.
 
 **FTP / FTPS.** The server lived inside the closed window, so it is already gone. On the **old PC**, elevated, remove its firewall rule and the export (the export contains Wi-Fi keys):
 
