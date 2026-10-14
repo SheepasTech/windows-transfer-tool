@@ -31,3 +31,4 @@ wallpaper.*
 Thumbs.db
 desktop.ini
 *.swp
+*.code-workspace
