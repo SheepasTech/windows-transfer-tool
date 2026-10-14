@@ -28,10 +28,27 @@ Optionally limit the firewall rules to the new PC's address once you know it:
 Set-NetFirewallRule -Group '@FirewallAPI.dll,-28502' -RemoteAddress 192.168.1.60
 ```
 
-On the **new PC**, connect once (the prompt asks for the old PC's Windows password) and then use `\\OLD\Migration\...` in the commands below instead of `\\OLD\C$\Users\Old\...`:
+On the **new PC**, connect once and then use `\\OLD\Migration\...` in the commands below instead of `\\OLD\C$\Users\Old\...`:
 
 ```powershell
 New-SmbMapping -RemotePath \\OLD\Migration -UserName OLD\username -Password (Read-Host 'Old PC password')
+```
+
+This still needs the old PC's real Windows password, because `-ReadAccess` above names the signed-in account. If you do not have that password, grant read access to a temporary account instead, same idea as the main tool's `-UseOwnAccount`-free default (see [process.md](process.md#the-temporary-account)):
+
+```powershell
+# OLD PC, elevated
+$pw = ConvertTo-SecureString (-join ((1..24) | ForEach-Object { [char](Get-Random -Minimum 33 -Maximum 126) })) -AsPlainText -Force
+New-LocalUser -Name WTT-manual -Password $pw
+Add-LocalGroupMember -Group Administrators -Member WTT-manual   # needed to read another account's profile
+Grant-SmbShareAccess -Name Migration -AccountName "$env:COMPUTERNAME\WTT-manual" -AccessRight Read -Force
+```
+
+Use `WTT-manual` and that password in the `New-SmbMapping` call above instead of your own account, and when you are done:
+
+```powershell
+# OLD PC, elevated
+Remove-LocalUser -Name WTT-manual
 ```
 
 ## Reverting the sharing changes by hand

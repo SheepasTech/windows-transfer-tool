@@ -15,7 +15,7 @@ irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/boo
 
 `-Scope Process` lifts the script policy for this PowerShell window only. It is not saved and reverts when you close the window.
 
-The bootstrap asks whether the PC is the **old** one (source) or the **new** one (destination), requests administrator rights, downloads the tool and starts it. Do the old PC first: it shows its IP address and a **pairing code**. Enter both on the new PC, choose what to transfer, and the two PCs proceed on their own. The old PC reverts its sharing changes when the new PC reports it is done.
+The bootstrap asks whether the PC is the **old** one (source) or the **new** one (destination), requests administrator rights, downloads the tool and starts it. Do the old PC first: it creates a **temporary account just for this transfer** and shows its IP address, a **pairing code**, and that account's name and password. Enter all of it on the new PC, choose what to transfer, and the two PCs proceed on their own. Nobody needs the old PC's real Windows or Microsoft account password - the temporary account is deleted automatically when the old PC reverts its sharing changes at the end.
 
 To preview on the new PC without changing anything:
 
@@ -35,15 +35,15 @@ flowchart LR
     subgraph OLD["OLD PC - source"]
         direction TB
         S1["S1 Preflight<br/>admin, right user, OneDrive check"] --> S2["S2 Export<br/>registry, Wi-Fi, app list, wallpaper"]
-        S2 --> S3["S3 Open sharing<br/>firewall, network profile, admin share"]
-        S3 --> S4["S4 Pair<br/>show IP + pairing code, wait"]
+        S2 --> S3["S3 Open sharing<br/>firewall, network profile, temporary account"]
+        S3 --> S4["S4 Pair<br/>show IP + pairing code + temp account, wait"]
         S4 --> S5["S5 Wait<br/>until the new PC is done"]
         S5 --> S6["S6 Cleanup<br/>revert sharing, delete export"]
     end
 
     subgraph NEW["NEW PC - destination"]
         direction TB
-        D1["D1 Preflight<br/>admin, right user, winget"] --> D2["D2 Bind<br/>IP, login, pairing code"]
+        D1["D1 Preflight<br/>admin, right user, winget"] --> D2["D2 Bind<br/>IP, temp account, pairing code"]
         D2 --> D3["D3 Select<br/>checkbox menu"]
         D3 --> D4["D4 Files<br/>robocopy personal folders"]
         D4 --> D5["D5 Apps<br/>winget, app data"]
@@ -53,7 +53,7 @@ flowchart LR
 
     B -.-> S1
     B -.-> D1
-    S4 -. "pairing code (on screen)" .-> D2
+    S4 -. "pairing code + temp account (on screen)" .-> D2
     D2 -. "bound.json" .-> S4
     D7 -. "done.json" .-> S5
 ```
@@ -93,6 +93,7 @@ Stage S4 on the old PC writes a salted hash of a random six-digit code into the 
 | | `-Threads <n>` | new | robocopy threads (default 8; Wi-Fi rarely benefits from more) |
 | | `-InitCredentials` | new | Generate `credentials.json` (below) |
 | | `-NoSave` | new | Never offer to save credentials |
+| | `-UseOwnAccount` | old | Sign in with your own Windows account instead of a temporary one |
 | | `-Cleanup` | old | Revert sharing and delete the export if stage S6 never ran |
 
 ## Credentials file
@@ -103,22 +104,23 @@ To avoid retyping the old PC's address and login, the tool can generate a local 
 .\Migrate-Windows.ps1 -InitCredentials
 ```
 
-It also offers to create it after the first successful connection. The file looks like [credentials.example.json](credentials.example.json):
+It also offers to create it after the first successful connection, unless you signed in with the default temporary account - that account is deleted at the end of the run, so saving its password would not help next time. The file looks like [credentials.example.json](credentials.example.json):
 
 - The password is encrypted with **Windows DPAPI**: only the same Windows user on the same PC can decrypt it.
 - The file's permissions are restricted to your user, and it is in `.gitignore`. **Never commit it, and never paste real values into the example file.**
-- If it goes stale (password changed), delete it and re-run.
+- If it goes stale (password changed, or it was from a temporary account that has since been deleted), delete it and re-run.
 
 ## Caveats and doing it by hand
 
 - [docs/caveats.md](docs/caveats.md): what the tool cannot do or does imperfectly, why, and the manual workaround for each.
 - [docs/manual.md](docs/manual.md): how to perform every item by hand, including opening and reverting the sharing yourself.
 
-The short version: saved browser passwords, Windows Credential Manager entries and default-app choices cannot be moved; taskbar pins only work for apps that are installed at the same path; the user `Path` variable and taskbar pins are not rewritten when the user name differs; display scaling is deliberately not copied; the old PC's admin share is exposed to the LAN between stages S3 and S4.
+The short version: saved browser passwords, Windows Credential Manager entries and default-app choices cannot be moved; taskbar pins only work for apps that are installed at the same path; the user `Path` variable and taskbar pins are not rewritten when the user name differs; display scaling is deliberately not copied; the old PC's admin share is exposed to the LAN between stages S3 and S4, reachable with the temporary account's password shown on screen (or your real one, if you passed `-UseOwnAccount`).
 
 ## Security notes
 
-- Stage S3 enables the "File and Printer Sharing" firewall group, marks Public networks Private, and sets `LocalAccountTokenFilterPolicy=1` so the admin share accepts a local account. Stage S4 then limits those firewall rules to the new PC's IP. Everything is recorded and restored in S6 (or by `-Cleanup`).
+- By default, stage S3 creates a disposable local administrator account (random name, 24-character password) used only to sign in for this transfer, hidden from the normal sign-in screen and deleted in S6. You never need the old PC's real Windows or Microsoft account password. Pass `-UseOwnAccount` on the old PC to sign in with a real account instead.
+- Stage S3 enables the "File and Printer Sharing" firewall group, marks Public networks Private, and sets `LocalAccountTokenFilterPolicy=1` so the admin share accepts a local account. Stage S4 then limits those firewall rules to the new PC's IP. Everything is recorded and restored in S6 (or by `-Cleanup`), including removing the temporary account.
 - The Wi-Fi export contains passwords in clear text inside `C:\MigrationExport` on the old PC until cleanup removes it.
 - The developer-config item copies private keys (`.ssh`, `.aws`, ...). It is off by default.
 - Passwords are never put on a command line; the SMB connection is made in-process.

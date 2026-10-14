@@ -12,7 +12,7 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 ## Network and security
  
 ### The old PC exposes its admin share
-**What happens.** Stage S3 enables File and Printer Sharing, makes Public networks Private, and sets `LocalAccountTokenFilterPolicy=1`. Until the new PC binds in S4, anyone on the same subnet who knows the old PC's Windows password can open `\\oldpc\C$` with full access. After binding, the firewall rules are limited to the new PC's address.
+**What happens.** Stage S3 enables File and Printer Sharing, makes Public networks Private, and sets `LocalAccountTokenFilterPolicy=1`. Until the new PC binds in S4, anyone on the same subnet who has a working sign-in for the old PC can open `\\oldpc\C$` with full access. That sign-in is normally the temporary account S3 just created and displays in S4, not a real account - see [the temporary account](process.md#the-temporary-account) - so the window of exposure is to that one-time password, not your real one. After binding, the firewall rules are limited to the new PC's address.
 **Why.** The admin share is the only share that exists on every Windows edition without creating one, and it reaches every folder a user may have redirected.
 **Instead.** Run the transfer on a home or office network you trust, never on public Wi-Fi. Or create a dedicated read-only share by hand ([manual.md](manual.md#sharing-by-hand)) and copy with robocopy yourself; then the token-filter policy is not needed.
 
@@ -23,8 +23,8 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 
 ### The pairing code is a confirmation, not a secret
 **What happens.** The six-digit code proves the new PC is reading the export of the PC you are looking at. It does not grant or deny access.
-**Why.** Access is granted by the Windows password over SMB; the code only lets the old PC learn which address to trust and lets you catch a wrong IP.
-**Instead.** Nothing to do; just do not treat the code as a password.
+**Why.** Access is granted by a password over SMB - normally the temporary account's, shown on the same screen as the code - and the code only lets the old PC learn which address to trust and lets you catch a wrong IP.
+**Instead.** Nothing to do; just do not treat the code as the secret. The account password shown next to it is the actual secret for this run.
 
 ### If the old PC window is closed, sharing stays open
 **What happens.** S6 only runs when S4/S5 finish or fail inside the script. Closing the window skips it.
@@ -36,9 +36,10 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 
 ## Accounts and sign-in
 
-### Microsoft accounts need the e-mail form
-**What happens.** Signing in to the old PC's share with a Microsoft account works with the account e-mail, sometimes only as `MicrosoftAccount\you@outlook.com`. The tool tries both forms. Windows Hello PIN-only sign-in does not change the password used over the network.
-**Instead.** If both forms fail, create a local administrator account on the old PC for the duration of the transfer and use that.
+### You do not need the Microsoft account password at all
+**What happens.** By default (no `-UseOwnAccount`), S3 creates a disposable local administrator account on the old PC just for this transfer, and D2's sign-in prompt expects that account's name and password, shown on the old PC's screen in S4 - not the real Microsoft account. You never need to know, type or have access to the real account's password, which also means a lost or reset password, or a work PC where someone else holds that password, no longer blocks the transfer.
+**Why.** SMB needs a password-equivalent credential even to just read the pairing file; a Windows Hello PIN or biometric sign-in on the old PC is not one, and the real Microsoft account password is often unavailable, not worth exposing over the network, or both.
+**Instead.** Pass `-UseOwnAccount` on the old PC only if you deliberately want to sign in with a real account instead - then the old PC's share sign-in works with the account e-mail, sometimes only as `MicrosoftAccount\you@outlook.com` (the tool tries both forms).
 
 ### Elevating with another account migrates the wrong profile
 **What happens.** If a standard user elevates by typing a different administrator's password, `HKCU` and `%USERPROFILE%` inside that window belong to the administrator. The tool compares the owner of Explorer with the current user and stops when they differ.

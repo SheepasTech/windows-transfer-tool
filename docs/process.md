@@ -4,6 +4,7 @@ The tool is two cooperating programs: `Migrate-Windows.ps1 -Mode Source` on the 
 
 - [Getting the tool onto both PCs](#getting-the-tool-onto-both-pcs)
 - [Old PC stages](#old-pc-stages)
+  - [The temporary account](#the-temporary-account)
 - [New PC stages](#new-pc-stages)
 - [Binding handshake](#binding-handshake)
 - [Sharing state on the old PC](#sharing-state-on-the-old-pc)
@@ -23,20 +24,20 @@ sequenceDiagram
     O->>O: ask role (1 = old PC), elevate (UAC)
     O->>G: GET Migrate-Windows.ps1
     G-->>O: script (parsed and hashed before use)
-    O->>O: -Mode Source  (S1..S4), shows IP + pairing code
+    O->>O: -Mode Source  (S1..S4), creates a temporary account, shows IP + pairing code + that account
     U->>N: irm .../bootstrap.ps1 | iex
     N->>N: ask role (2 = new PC), elevate (UAC)
     N->>G: GET Migrate-Windows.ps1
     G-->>N: script
     N->>N: -Mode Destination (D1..D7)
-    N->>O: SMB connect, verify code, bound.json
+    N->>O: SMB connect as the temporary account, verify code, bound.json
     O->>O: S4 scopes firewall to the new PC, S5 waits
     N->>O: copy files, read registry exports
     N->>O: done.json
     O->>O: S6 cleanup
 ```
 
-`bootstrap.ps1` only needs the network; the two copies of `Migrate-Windows.ps1` then talk to each other over SMB. Nothing is uploaded anywhere.
+`bootstrap.ps1` only needs the network; the two copies of `Migrate-Windows.ps1` then talk to each other over SMB. Nothing is uploaded anywhere. By default the new PC signs in with a disposable account the old PC creates for this one run, not with either PC's real Windows or Microsoft account - see [the temporary account](#the-temporary-account).
 
 ## Old PC stages
 
@@ -63,13 +64,15 @@ flowchart TD
     E5 --> S3
     subgraph S3["S3 Open sharing (recorded in prep-state.json)"]
         direction TB
-        H1["start Server service if stopped"] --> H2["enable firewall group<br/>File and Printer Sharing"]
+        H0{"-UseOwnAccount?"} -- no --> H0a["create temporary local admin account<br/>random name + 24-char password"]
+        H0 -- yes --> H1
+        H0a --> H1["start Server service if stopped"] --> H2["enable firewall group<br/>File and Printer Sharing"]
         H2 --> H3["Public networks -> Private"] --> H4["LocalAccountTokenFilterPolicy = 1"]
     end
     H4 --> S4
     subgraph S4["S4 Pair"]
         direction TB
-        R1["pair.json: salt + SHA256(salt:code)"] --> R2["show IP addresses + 6-digit code"]
+        R1["pair.json: salt + SHA256(salt:code)"] --> R2["show IP addresses + 6-digit code<br/>+ temporary account name/password (if created)"]
         R2 --> R3{"bound.json with<br/>matching SessionId?"}
         R3 -- "Enter / Q" --> CANCEL["cancelled"]
         R3 -- yes --> R4["resolve client IP (SMB session)"] --> R5["firewall rules RemoteAddress = that IP"]
@@ -84,19 +87,23 @@ flowchart TD
     subgraph S6["S6 Cleanup (also: -Cleanup)"]
         C1["restore firewall rules (enabled state + addresses)"] --> C2["Private -> Public where it was Public"]
         C2 --> C3["restore / remove LocalAccountTokenFilterPolicy"] --> C4["stop Server service if we started it"]
-        C4 --> C5["delete C:\MigrationExport"]
+        C4 --> C5["delete the temporary account, if one was created"] --> C6["delete C:\MigrationExport"]
     end
-    C5 --> Z([Old PC unchanged])
+    C6 --> Z([Old PC unchanged])
 ```
 
 | Stage | Changes on the old PC | Undo |
 |---|---|---|
 | S1 | none | |
 | S2 | writes `C:\MigrationExport` (contains Wi-Fi passwords in clear text) | deleted in S6 |
-| S3 | firewall group enabled, network profile Private, `LocalAccountTokenFilterPolicy=1`, Server service started if it was stopped | S6 restores each from `prep-state.json` |
+| S3 | creates a temporary local administrator account unless `-UseOwnAccount`; firewall group enabled, network profile Private, `LocalAccountTokenFilterPolicy=1`, Server service started if it was stopped | S6 restores each from `prep-state.json`, including deleting the temporary account |
 | S4 | firewall rules scoped to the new PC's IP | S6 restores the original addresses |
 | S5 | none | |
 | S6 | reverts S2 to S4 | |
+
+### The temporary account
+
+Stage S3 normally creates a local administrator account named `WTT-xxxxxxxx` with a random 24-character password, used for nothing except the SMB sign-in the new PC needs in D2. It is hidden from the normal sign-in screen, shown on screen in S4 next to the pairing code, and deleted again in S6 - it never touches your real account and does not need your Microsoft account password, which is the point: you may not have that password at all (lost, reset, or held by someone else on a work PC). The new PC does not offer to save it to `credentials.json`, because it stops working the moment this run ends. Pass `-UseOwnAccount` on the old PC to skip all of this and sign in with your own Windows account instead, as earlier versions of this tool required.
 
 Any error after S1 jumps straight to S6, so sharing is never left open by an exception. If the window is closed, run `Migrate-Windows.ps1 -Cleanup` (elevated) or follow [manual.md](manual.md#reverting-the-sharing-changes-by-hand).
 
@@ -116,14 +123,16 @@ flowchart TD
     P3 --> D2
     subgraph D2["D2 Bind"]
         direction TB
-        B1["credentials.json or prompt: IP, user, password"] --> B2{"ping ok?"}
+        B1["credentials.json or prompt: IP, temporary account name/password<br/>(from the old PC's S4 screen)"] --> B2{"ping ok?"}
         B2 -- no --> X2[/"stop: old PC not reachable"/]
         B2 -- yes --> B3["SMB connect to the old PC's C$ share<br/>tries: user, IP + user, MicrosoftAccount + email"]
         B3 --> B4{"manifest.json present?"}
         B4 -- no --> X3[/"stop: run Source first"/]
         B4 -- yes --> B5{"pairing code matches pair.json?"}
         B5 -- "no (3 tries)" --> X4[/"stop: wrong PC or code"/]
-        B5 -- yes --> B6["write bound.json"] --> B7["offer to save credentials.json"]
+        B5 -- yes --> B6["write bound.json"] --> B7{"temporary account?"}
+        B7 -- yes --> B7a["skip credentials.json offer<br/>(stops working at S6 cleanup)"]
+        B7 -- no --> B7b["offer to save credentials.json"]
     end
     B7 --> D3
     subgraph D3["D3 Select"]
@@ -161,7 +170,7 @@ flowchart TD
 | Stage | Changes on the new PC | Undo |
 |---|---|---|
 | D1 | none | |
-| D2 | SMB connection to the old PC; optional `credentials.json` next to the script | connection removed at the end; delete the file |
+| D2 | SMB connection to the old PC, normally as its temporary account; optional `credentials.json` next to the script (skipped for a temporary account) | connection removed at the end; delete the file |
 | D3 | none | |
 | D4 | files added to the profile folders. `/XO` means a newer file already on the new PC is never overwritten | delete what you do not want; `robocopy-*.log` lists every file |
 | D5 | app data files, winget installs, VS Code extensions | uninstall; delete files |
@@ -201,7 +210,7 @@ sequenceDiagram
 What the code does and does not protect:
 
 - It confirms the new PC is reading the export of the PC whose screen you are looking at, and lets the old PC learn which address to trust.
-- It is not a secret. Anyone who can already open `\\oldpc\C$` has the Windows password, which is the real credential.
+- It is not a secret by itself. Anyone who can already open `\\oldpc\C$` has a working credential - normally the temporary account's password, shown on the same screen. That password *is* the real secret for this run: anyone who reads it off the old PC's screen before you do can also connect.
 - The firewall scope stops other machines reaching the sharing ports after binding. Between S3 and the moment of binding the share is open to the local subnet, as it is on any PC with sharing turned on.
 
 ## Sharing state on the old PC

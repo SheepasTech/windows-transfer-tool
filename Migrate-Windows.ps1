@@ -6,8 +6,13 @@
   OLD PC  (-Mode Source)       S1 Preflight > S2 Export > S3 Share > S4 Pair > S5 Wait > S6 Cleanup
   NEW PC  (-Mode Destination)  D1 Preflight > D2 Bind > D3 Select > D4 Files > D5 Apps > D6 Settings > D7 Finish
 
+  Stage S3 on the old PC creates a disposable local administrator account just for the transfer
+  (shown on screen in S4, deleted in S6), so the new PC never needs your real Windows or Microsoft
+  account password. Pass -UseOwnAccount on the old PC to sign in with your own account instead.
+
   Normally started by bootstrap.ps1 (see README.md). Direct use from an elevated PowerShell:
     .\Migrate-Windows.ps1 -Mode Source                    old PC
+    .\Migrate-Windows.ps1 -Mode Source -UseOwnAccount     old PC, sign in with your own account
     .\Migrate-Windows.ps1 -Mode Destination -DryRun       new PC, preview only
     .\Migrate-Windows.ps1 -Mode Destination               new PC
     .\Migrate-Windows.ps1 -Cleanup                        old PC, if stage S6 never ran
@@ -25,6 +30,7 @@ Param(
     [switch]$Cleanup,                        # OLD PC: revert sharing and delete the export
     [switch]$InitCredentials,                # NEW PC: generate credentials.json
     [switch]$NoSave,                         # NEW PC: never offer to save credentials
+    [switch]$UseOwnAccount,                  # OLD PC: sign in with your own Windows account instead of a disposable temp one
     [string]$CredentialFile = $(if ($PSScriptRoot) { Join-Path $PSScriptRoot 'credentials.json' } else { Join-Path (Get-Location) 'credentials.json' }),
     [int]$Threads = 8                        # robocopy threads
 )
@@ -227,7 +233,7 @@ function Read-CredentialFile {
 function Start-InitCredentials {
     Write-Host "Creating $CredentialFile" -ForegroundColor White
     $ip = Read-Host 'IP address of the OLD PC'
-    $cred = Get-Credential -Message 'Sign-in for the OLD PC. Local account: user name. Microsoft account: e-mail address.'
+    $cred = Get-Credential -Message 'Sign-in for the OLD PC. Normally the temporary account shown on the old PC in stage S4 (it is different every run, so saving it here only helps for a single run started very soon). Local account: user name. Microsoft account: e-mail address.'
     New-CredentialFile -Path $CredentialFile -IP $ip -Cred $cred
     Write-Ok 'Saved. This file is git-ignored; the password can only be decrypted by you on this PC.'
 }
@@ -237,8 +243,33 @@ function Start-InitCredentials {
 # =============================================================================
 function Save-PrepState($State) { $State | ConvertTo-Json -Depth 5 | Set-Content -Path "$ExportDir\prep-state.json" -Encoding UTF8 }
 
+# A disposable local administrator account, used only to authenticate the SMB connection, so the
+# new PC never needs the real sign-in (and its Microsoft-account password, which you may not have
+# at all - e.g. after a password reset, or on a work PC where someone else holds that password).
+# It is deleted again in S6 Cleanup. -UseOwnAccount skips all of this and uses the signed-in account instead.
+function New-TransferAccount {
+    $name = 'WTT-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%'
+    $bytes = New-Object byte[] 24
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $pw = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
+    $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+    New-LocalUser -Name $name -Password $sec -FullName 'Windows Transfer Tool (temporary)' -Description 'Created by Migrate-Windows.ps1 for one transfer. Safe to delete.' -PasswordNeverExpires -AccountNeverExpires | Out-Null
+    Add-LocalGroupMember -Group 'Administrators' -Member $name
+    # Keep it off the normal sign-in screen; it only needs to work over the network.
+    try { New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\SpecialAccounts\UserList' -Name $name -PropertyType DWord -Value 0 -Force -ErrorAction Stop | Out-Null } catch {}
+    return @{ Name = $name; Password = $pw }
+}
+
+function Remove-TransferAccount([string]$Name) {
+    if (-not $Name) { return }
+    try { Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\SpecialAccounts\UserList' -Name $Name -ErrorAction SilentlyContinue } catch {}
+    try { Remove-LocalUser -Name $Name -ErrorAction Stop } catch { Write-Warn "Could not remove temporary account '$Name' ($($_.Exception.Message)). Remove it by hand: Computer Management > Local Users." }
+}
+
 function Enable-Sharing {
-    $state = @{ Rules = @(); PublicIfaces = @(); Policy = $null; ServerStarted = $false; BoundTo = $null }
+    param([string]$TransferAccount)
+    $state = @{ Rules = @(); PublicIfaces = @(); Policy = $null; ServerStarted = $false; BoundTo = $null; TransferAccount = $TransferAccount }
     $svc = Get-Service LanmanServer -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -ne 'Running') { Start-Service LanmanServer; $state.ServerStarted = $true }
     foreach ($r in @(Get-NetFirewallRule -Group $FwGroup -ErrorAction SilentlyContinue)) {
@@ -281,6 +312,7 @@ function Restore-Sharing {
     if ($null -eq $s.Policy) { Remove-ItemProperty $PolicyKey -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue }
     else { Set-ItemProperty $PolicyKey -Name LocalAccountTokenFilterPolicy -Value $s.Policy -Type DWord }
     if ($s.ServerStarted) { Stop-Service LanmanServer -Force -ErrorAction SilentlyContinue }
+    if ($s.TransferAccount) { Remove-TransferAccount $s.TransferAccount }
 }
 
 function Start-SourceCleanup {
@@ -412,7 +444,12 @@ function Start-SourceMode {
         Write-Ok "Export written to $ExportDir"
 
         Write-Stage 'S3' 'Open sharing (temporary - reverted in S6)'
-        $state = Enable-Sharing
+        $account = $null
+        if (-not $UseOwnAccount) {
+            Write-Step 'Creating a temporary account just for this transfer'
+            $account = New-TransferAccount
+        }
+        $state = Enable-Sharing -TransferAccount $(if ($account) { $account.Name })
         Write-Ok 'File and printer sharing is open for the transfer.'
 
         Write-Stage 'S4' 'Pair with the new PC'
@@ -422,8 +459,15 @@ function Start-SourceMode {
         Write-Host '   Address(es) of this PC:' -ForegroundColor White
         Get-IPv4List | ForEach-Object { Write-Host "     $_" -ForegroundColor White }
         Write-Host ('   Pairing code:   {0} {1}' -f $pair.Code.Substring(0, 3), $pair.Code.Substring(3)) -ForegroundColor Green
-        Write-Host "   Sign in there with this PC's user name and password ($env:USERNAME)." -ForegroundColor White
-        Write-Host "   (Microsoft account? use the account's e-mail address as the user name.)"
+        if ($account) {
+            Write-Host '   Sign in there with this temporary account (not your Microsoft account):' -ForegroundColor White
+            Write-Host ('     User name:  {0}' -f $account.Name) -ForegroundColor Green
+            Write-Host ('     Password:   {0}' -f $account.Password) -ForegroundColor Green
+            Write-Host '   It is deleted automatically when this finishes - it is not your sign-in account and grants no access beyond this transfer.' -ForegroundColor DarkGray
+        } else {
+            Write-Host "   Sign in there with this PC's user name and password ($env:USERNAME)." -ForegroundColor White
+            Write-Host "   (Microsoft account? use the account's e-mail address as the user name.)"
+        }
         Write-Host ''
         $bound = Wait-ForMarker -Path "$ExportDir\bound.json" -SessionId $pair.SessionId -Hint 'Waiting for the new PC to connect...  (Enter or Q cancels and reverts sharing)'
         if (-not $bound) { Write-Warn 'Cancelled.'; return }
@@ -819,7 +863,7 @@ function Start-DestinationMode {
     if ($saved) { $cred = $saved.Cred; $fromFile = $true; Write-Ok "Using saved credentials from $CredentialFile" }
     $script:IP = if ($OldPCIP) { $OldPCIP } elseif ($saved -and $saved.IP) { $saved.IP } else { Read-Host 'IP address of the OLD PC (shown by the old PC in stage S4)' }
     if (-not (Test-Connection $script:IP -Count 1 -Quiet)) { throw "Cannot reach $($script:IP). Same network? Is the old PC waiting in stage S4?" }
-    if (-not $cred) { $cred = Get-Credential -Message "Sign-in for the OLD PC ($($script:IP)). Local account: user name. Microsoft account: e-mail address." }
+    if (-not $cred) { $cred = Get-Credential -Message "Sign-in for the OLD PC ($($script:IP)). Use the temporary account and password shown on the OLD PC's screen in stage S4 - not your Microsoft account (unless the old PC was run with -UseOwnAccount)." }
 
     $share = "\\$($script:IP)\C$"
     try { $usedName = Connect-OldPC -Share $share -Cred $cred }
@@ -845,7 +889,9 @@ function Start-DestinationMode {
                 IPs = @(Get-IPv4Addresses | ForEach-Object { $_.IPAddress }); BoundAt = (Get-Date).ToString('s'); ToolVersion = $ToolVersion })
             if ($ok) { Write-Ok ('Bound: {0} <-> {1}. The old PC now limits sharing to this PC.' -f $script:Manifest.ComputerName, $env:COMPUTERNAME) }
         }
-        if (-not $fromFile -and -not $NoSave -and -not $Select -and -not $Yes) {
+        if ($cred.UserName -match '^(.*\\)?WTT-[0-9a-f]{8}$') {
+            Write-Host 'Not offering to save credentials: this is a one-time temporary account, deleted on the old PC when the transfer finishes.' -ForegroundColor DarkGray
+        } elseif (-not $fromFile -and -not $NoSave -and -not $Select -and -not $Yes) {
             if ((Read-Host "Save these credentials to $CredentialFile for next time? Password is encrypted for this user/PC only (y/N)") -match '^y') {
                 New-CredentialFile -Path $CredentialFile -IP $script:IP -Cred $cred
                 Write-Ok 'Saved (git-ignored).'

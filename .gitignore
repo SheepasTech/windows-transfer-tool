@@ -22,6 +22,9 @@ done.json
 manifest.json
 wallpaper.*
 
+# Local project tracking - not part of the shipped tool
+.project/
+
 # Editors / OS
 .vscode/
 .idea/
