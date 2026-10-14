@@ -2,18 +2,46 @@
 
 Every item the tool offers, as manual steps. Useful when an item failed, when you want to move one more thing after the old PC is already cleaned up, or when you would rather not run the tool at all. Commands are PowerShell unless noted; "elevated" means Run as administrator.
 
-Throughout, `OLD` is the old PC's name or IP and `C:\Users\Old` / `C:\Users\New` are the two profile folders.
+Throughout, `OLD` is the old PC's name or IP and `C:\Users\Old` / `C:\Users\New` are the two profile folders. The `robocopy` commands below read from the old PC over SMB; if you use the tool's FTP service instead, fetch the same folders with an FTP client (see the next section).
 
+- [Using the FTP service by hand](#using-the-ftp-service-by-hand)
 - [Sharing by hand](#sharing-by-hand)
-- [Reverting the sharing changes by hand](#reverting-the-sharing-changes-by-hand)
+- [Reverting by hand](#reverting-by-hand)
 - [Personal files](#personal-files)
 - [Apps and app data](#apps-and-app-data)
 - [Windows settings](#windows-settings)
 - [Any other app](#any-other-app)
 
+## Using the FTP service by hand
+
+While the old PC's window is in stage S4 or S5 its FTP service is running, and any FTP client can use it instead of the new PC's half of the tool (for example to fetch one more folder, or to try the connection). The service is read-only; the examples below were checked against `curl`, the other clients are standard FTP and should work the same way.
+
+| Setting | Value |
+|---|---|
+| Host | the old PC's IP address, shown in S4 |
+| Port | `2121` (or the `-FtpPort` you gave) |
+| User | `wtt` |
+| Password | the 16 characters shown in S4, **without the dashes**, in capitals (the tool's own client forgives dashes and spaces, other clients do not) |
+| Encryption | **Require explicit FTP over TLS** for FTPS (`AUTH TLS`); none for plain FTP |
+| Mode | passive (the service has no active mode), data ports 52100-52150 |
+
+Folders you can reach: `/pkg` (the export package), `/profile` (the whole user profile), and `/known-Desktop`, `/known-Documents`, `/known-Pictures`, `/known-Videos`, `/known-Music`, `/known-Downloads` (the real locations of the known folders, which differ from `/profile/...` when OneDrive or a folder redirection is involved). `prep-state.json` is hidden, uploads are refused except two small marker files, and junctions are not listed.
+
+With FTPS a GUI client such as WinSCP or FileZilla shows the certificate's SHA-256 fingerprint on first connect. Compare it with the Fingerprint line on the old PC's screen **before** accepting it; the certificate is self-signed and different every run. Windows Explorer's `ftp://` and the built-in `ftp.exe` cannot do TLS, so they only work if the old PC was started with `-Transport Ftp`.
+
+Quick checks and single files with the `curl.exe` that ships with Windows (`-k` turns certificate checking off, so use it only after you compared the fingerprint another way, for instance in a GUI client):
+
+```powershell
+curl.exe --ssl-reqd -k -u wtt:ABCDEFGHJKLMNPQR "ftp://OLD:2121/profile/Documents/"              # list a folder
+curl.exe --ssl-reqd -k -u wtt:ABCDEFGHJKLMNPQR -O "ftp://OLD:2121/known-Documents/report.docx"    # download one file
+curl.exe -u wtt:ABCDEFGHJKLMNPQR "ftp://OLD:2121/pkg/manifest.json"                                # plain FTP: drop --ssl-reqd and -k
+```
+
+Whole folders are easier with WinSCP or FileZilla (recursive download); curl copies one file per call. A file copied this way gets the download time as its modified time unless the client keeps the remote time (curl: add `-R`; the service answers `MDTM`, but that combination is untested). The tool's own client always keeps it.
+
 ## Sharing by hand
 
-A dedicated read-only share of the profile avoids both the admin share and the `LocalAccountTokenFilterPolicy` change. On the **old PC**, elevated:
+This section is for SMB. A dedicated read-only share of the profile avoids both the admin share and the `LocalAccountTokenFilterPolicy` change. On the **old PC**, elevated:
 
 ```powershell
 New-SmbShare -Name Migration -Path $env:USERPROFILE -ReadAccess "$env:COMPUTERNAME\$env:USERNAME"
@@ -34,7 +62,7 @@ On the **new PC**, connect once and then use `\\OLD\Migration\...` in the comman
 New-SmbMapping -RemotePath \\OLD\Migration -UserName OLD\username -Password (Read-Host 'Old PC password')
 ```
 
-This still needs the old PC's real Windows password, because `-ReadAccess` above names the signed-in account. If you do not have that password, grant read access to a temporary account instead, same idea as the main tool's `-UseOwnAccount`-free default (see [process.md](process.md#the-temporary-account)):
+This still needs the old PC's real Windows password, because `-ReadAccess` above names the signed-in account. If you do not have that password, grant read access to a temporary account instead, same idea as the tool's SMB default (see [process.md](process.md#the-temporary-account-smb)) - or skip Windows accounts entirely and use the FTP service above:
 
 ```powershell
 # OLD PC, elevated
@@ -51,9 +79,24 @@ Use `WTT-manual` and that password in the `New-SmbMapping` call above instead of
 Remove-LocalUser -Name WTT-manual
 ```
 
-## Reverting the sharing changes by hand
+## Reverting by hand
 
-If the tool's window was closed before stage S6 and `Migrate-Windows.ps1 -Cleanup` is not available, on the **old PC**, elevated:
+If the tool's window was closed before stage S6 and `Migrate-Windows.ps1 -Cleanup` is not available:
+
+**FTP / FTPS.** The server lived inside the closed window, so it is already gone. On the **old PC**, elevated, remove its firewall rule and the export (the export contains Wi-Fi keys):
+
+```powershell
+Remove-NetFirewallRule -Name WindowsTransferTool-temporary -ErrorAction SilentlyContinue
+Remove-Item C:\MigrationExport -Recurse -Force
+```
+
+On the **new PC**, if its window was killed during a run, delete the temporary copy of the export package (it also contains the Wi-Fi keys):
+
+```powershell
+Get-ChildItem $env:TEMP -Directory -Filter 'wtt-*' | Remove-Item -Recurse -Force
+```
+
+**SMB.** On the **old PC**, elevated:
 
 ```powershell
 # 1. firewall group back to its default (disabled on Public, enabled on Private/Domain) and unscoped
@@ -71,6 +114,9 @@ Remove-Item C:\MigrationExport -Recurse -Force
 
 # 5. if you created the manual share above
 Remove-SmbShare -Name Migration -Force
+
+# 6. the tool's temporary account, if the window was closed before S6 deleted it (its name is in prep-state.json, WTT-xxxxxxxx)
+Get-LocalUser | Where-Object Name -like 'WTT-*' | Remove-LocalUser
 ```
 
 `C:\MigrationExport\prep-state.json`, if it still exists, lists exactly which rules were enabled and which interfaces were Public before the tool ran.

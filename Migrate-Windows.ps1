@@ -6,13 +6,19 @@
   OLD PC  (-Mode Source)       S1 Preflight > S2 Export > S3 Share > S4 Pair > S5 Wait > S6 Cleanup
   NEW PC  (-Mode Destination)  D1 Preflight > D2 Bind > D3 Select > D4 Files > D5 Apps > D6 Settings > D7 Finish
 
-  Stage S3 on the old PC creates a disposable local administrator account just for the transfer
-  (shown on screen in S4, deleted in S6), so the new PC never needs your real Windows or Microsoft
-  account password. Pass -UseOwnAccount on the old PC to sign in with your own account instead.
+  Three ways for the new PC to reach the old one (-Transport, chosen on the old PC):
+    Ftps  (default)  FTP over TLS with a self-signed certificate. The old PC runs a small read-only
+                     server (lib\WttFtp.cs) with a random one-time password; no Windows account of
+                     any kind is involved. The new PC checks the certificate fingerprint.
+    Ftp              The same without encryption (only for a LAN you fully trust).
+    Smb              The old PC's admin share. Stage S3 creates a disposable local administrator
+                     account for the sign-in (shown in S4, deleted in S6); -UseOwnAccount uses
+                     your own account instead.
+  The new PC detects which one the old PC offers (-Transport Auto, the default there).
 
   Normally started by bootstrap.ps1 (see README.md). Direct use from an elevated PowerShell:
-    .\Migrate-Windows.ps1 -Mode Source                    old PC
-    .\Migrate-Windows.ps1 -Mode Source -UseOwnAccount     old PC, sign in with your own account
+    .\Migrate-Windows.ps1 -Mode Source                    old PC, FTPS
+    .\Migrate-Windows.ps1 -Mode Source -Transport Smb     old PC, SMB with a temporary account
     .\Migrate-Windows.ps1 -Mode Destination -DryRun       new PC, preview only
     .\Migrate-Windows.ps1 -Mode Destination               new PC
     .\Migrate-Windows.ps1 -Cleanup                        old PC, if stage S6 never ran
@@ -30,7 +36,10 @@ Param(
     [switch]$Cleanup,                        # OLD PC: revert sharing and delete the export
     [switch]$InitCredentials,                # NEW PC: generate credentials.json
     [switch]$NoSave,                         # NEW PC: never offer to save credentials
-    [switch]$UseOwnAccount,                  # OLD PC: sign in with your own Windows account instead of a disposable temp one
+    [switch]$UseOwnAccount,                  # OLD PC, Smb only: sign in with your own Windows account instead of a disposable temp one
+    [ValidateSet('Auto','Ftps','Ftp','Smb')][string]$Transport = 'Auto',   # OLD PC: Auto = Ftps. NEW PC: Auto = detect what the old PC offers
+    [ValidateRange(1,65535)][int]$FtpPort = 2121,                          # both PCs: control port of the FTP(S) service
+    [string]$Fingerprint,                    # NEW PC, Ftps: expected certificate SHA-256 (first 32+ hex digits) instead of confirming by eye
     [string]$CredentialFile = $(if ($PSScriptRoot) { Join-Path $PSScriptRoot 'credentials.json' } else { Join-Path (Get-Location) 'credentials.json' }),
     [int]$Threads = 8                        # robocopy threads
 )
@@ -41,6 +50,10 @@ $ExportDir   = 'C:\MigrationExport'
 $CV          = 'HKCU\Software\Microsoft\Windows\CurrentVersion'
 $FwGroup     = '@FirewallAPI.dll,-28502'     # firewall rule group "File and Printer Sharing"
 $PolicyKey   = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+$FtpUser     = 'wtt'
+$FtpPasvLow  = 52100                         # passive data ports of the FTP(S) service: 52100-52150
+$FtpPasvHigh = 52150
+$FtpRuleName = 'WindowsTransferTool-temporary'   # inbound firewall rule, removed in S6
 $StageNames  = @('Files','Apps','Settings')  # order of the destination work stages D4, D5, D6
 if ($Mode -eq 'Target') { $Mode = 'Destination' }
 
@@ -201,6 +214,41 @@ function Assert-SignedInUser {
 function Test-OneDrivePath([string]$Path) { return [bool]($Path -and $Path -match '\\OneDrive') }
 
 # =============================================================================
+# FTP / FTPS helpers - the transport itself (server, client, mirror) is lib\WttFtp.cs,
+# compiled on first use. Both PCs need the lib folder next to this script.
+# =============================================================================
+function Import-WttFtp {
+    if ('Wtt.FtpServer' -as [type]) { return }
+    $dir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $cs = Join-Path $dir 'lib\WttFtp.cs'
+    if (-not (Test-Path -LiteralPath $cs)) { throw "lib\WttFtp.cs not found ($cs). Run the bootstrap one-liner again, or copy the whole folder - not just Migrate-Windows.ps1." }
+    Add-Type -TypeDefinition (Get-Content -LiteralPath $cs -Raw) -Language CSharp
+}
+
+# 16 characters from an alphabet without look-alikes (no 0/O, no 1/I): 80 bits, shown as XXXX-XXXX-XXXX-XXXX.
+function New-FtpPassword {
+    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'      # 32 symbols, so a random byte maps to one without bias
+    $bytes = New-Object byte[] 16
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return (-join ($bytes | ForEach-Object { $alphabet[$_ % 32] }))
+}
+function Format-FtpPassword([string]$Pw) { return ($Pw -replace '(.{4})(?=.)', '$1-') }
+function ConvertFrom-TypedFtpPassword([string]$Typed) { return (($Typed -replace '[\s-]', '').ToUpperInvariant()) }
+# First 32 hex digits (128 bits) in groups of four - short enough to compare by eye.
+function Format-Fingerprint([string]$Hex) { return (($Hex.Substring(0, 32)) -replace '(.{4})(?=.)', '$1 ') }
+
+# Inbound rule for the control port and the passive range; the old PC's own firewall otherwise drops the new PC.
+function Open-FtpFirewall {
+    Remove-NetFirewallRule -Name $FtpRuleName -ErrorAction SilentlyContinue
+    [void](New-NetFirewallRule -Name $FtpRuleName -DisplayName 'Windows Transfer Tool (temporary, removed when the transfer ends)' `
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort @([string]$FtpPort, "$FtpPasvLow-$FtpPasvHigh") `
+        -Profile Any -RemoteAddress LocalSubnet)
+}
+function Limit-FtpFirewallTo([string]$Ip) { Set-NetFirewallRule -Name $FtpRuleName -RemoteAddress $Ip -ErrorAction SilentlyContinue }
+function Close-FtpFirewall { Remove-NetFirewallRule -Name $FtpRuleName -ErrorAction SilentlyContinue }
+
+# =============================================================================
 # Credentials file (credentials.json - git-ignored, generated on demand)
 #   The password is encrypted with Windows DPAPI: only the same Windows user on
 #   the same PC can decrypt it. Copying the file to another machine will not work.
@@ -299,10 +347,47 @@ function Limit-SharingTo([string]$Ip, $State) {
     return $n
 }
 
+# FTP / FTPS variant of S3: start the read-only service and open its ports. Nothing about SMB, sharing,
+# network profiles or Windows accounts is touched. Returns the running server and what to show on screen.
+function Start-FtpService {
+    param([string]$Mode, $Known)
+    Import-WttFtp
+    $password = New-FtpPassword
+    $cert = $null
+    if ($Mode -eq 'Ftps') { $cert = [Wtt.FtpUtil]::CreateSelfSigned($env:COMPUTERNAME, 2) }
+    $server = New-Object Wtt.FtpServer ([Net.IPAddress]::Any), $FtpPort, $FtpPasvLow, $FtpPasvHigh, $FtpUser, $password, $cert
+    $server.AddRoot('pkg', $ExportDir)
+    $server.AddRoot('profile', $env:USERPROFILE)
+    foreach ($k in $Known.Keys) { if (Test-Path -LiteralPath $Known[$k]) { $server.AddRoot("known-$k", $Known[$k]) } }
+    $server.Hide('/pkg/prep-state.json')
+    $server.AllowUpload('/pkg/bound.json'); $server.AllowUpload('/pkg/done.json')
+    # Record what must be undone before changing anything, so -Cleanup still works if this window dies.
+    $state = @{ Transport = $Mode; FirewallRule = $FtpRuleName; BoundTo = $null }
+    Save-PrepState $state
+    Open-FtpFirewall
+    try { $server.Start() }
+    catch {
+        $msg = $_.Exception.Message
+        $server.Dispose()
+        throw "Could not start the $Mode service on port $FtpPort ($msg). Is another program using that port? Try -FtpPort <other port> on both PCs."
+    }
+    $fp = $null; if ($cert) { $fp = [Wtt.FtpUtil]::Sha256Hex($cert.RawData) }
+    return @{ Server = $server; Password = $password; Fingerprint = $fp; State = $state }
+}
+
+# Which address logged in? The server saw it directly; the new PC's own list is only the fallback.
+function Resolve-BoundIPFtp($Bound, $Server) {
+    $claimed = @($Bound.IPs | Where-Object { $_ })
+    if ($Server.LastLoginIp) { return [string]$Server.LastLoginIp }
+    if ($claimed.Count -gt 0) { return $claimed[0] }
+    return $null
+}
+
 function Restore-Sharing {
     $f = "$ExportDir\prep-state.json"
     if (-not (Test-Path $f)) { Write-Warn 'No saved sharing state found; nothing to revert.'; return }
     $s = Get-Content $f -Raw | ConvertFrom-Json
+    if ($s.Transport -in 'Ftp','Ftps') { Close-FtpFirewall; return }
     foreach ($r in @($s.Rules)) {
         $ra = @($r.RemoteAddress | Where-Object { $_ })
         if ($ra.Count -gt 0) { Set-NetFirewallRule -Name $r.Name -Enabled $r.Enabled -RemoteAddress $ra -ErrorAction SilentlyContinue }
@@ -376,7 +461,9 @@ function Start-SourceMode {
     if (-not (Test-Admin)) { throw 'Run this in an elevated PowerShell (Run as administrator), signed in as the user you are migrating.' }
     Assert-SignedInUser
     Set-KeepAwake $true
-    Write-Host ("Exporting settings for user '{0}' ({1})" -f $env:USERNAME, $env:USERPROFILE) -ForegroundColor White
+    $transport = if ($Transport -eq 'Auto') { 'Ftps' } else { $Transport }
+    $ftp = $null
+    Write-Host ("Exporting settings for user '{0}' ({1}); transfer method: {2}" -f $env:USERNAME, $env:USERPROFILE, $transport.ToUpper()) -ForegroundColor White
 
     # Known folder locations (follows OneDrive redirection)
     $usf = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
@@ -443,14 +530,21 @@ function Start-SourceMode {
         }
         Write-Ok "Export written to $ExportDir"
 
-        Write-Stage 'S3' 'Open sharing (temporary - reverted in S6)'
-        $account = $null
-        if (-not $UseOwnAccount) {
-            Write-Step 'Creating a temporary account just for this transfer'
-            $account = New-TransferAccount
+        $account = $null; $state = $null
+        if ($transport -eq 'Smb') {
+            Write-Stage 'S3' 'Open sharing (temporary - reverted in S6)'
+            if (-not $UseOwnAccount) {
+                Write-Step 'Creating a temporary account just for this transfer'
+                $account = New-TransferAccount
+            }
+            $state = Enable-Sharing -TransferAccount $(if ($account) { $account.Name })
+            Write-Ok 'File and printer sharing is open for the transfer.'
+        } else {
+            Write-Stage 'S3' ('Start the {0} service (temporary - removed in S6)' -f $transport.ToUpper())
+            $ftp = Start-FtpService -Mode $transport -Known $known
+            $state = $ftp.State
+            Write-Ok ('{0} service listening on port {1}: read-only, one random password, firewall opened for the local subnet only.' -f $transport.ToUpper(), $FtpPort)
         }
-        $state = Enable-Sharing -TransferAccount $(if ($account) { $account.Name })
-        Write-Ok 'File and printer sharing is open for the transfer.'
 
         Write-Stage 'S4' 'Pair with the new PC'
         $pair = New-PairFile
@@ -458,8 +552,18 @@ function Start-SourceMode {
         Write-Host '   On the NEW PC run the bootstrap one-liner from the README, or:  .\Migrate-Windows.ps1 -Mode Destination' -ForegroundColor White
         Write-Host '   Address(es) of this PC:' -ForegroundColor White
         Get-IPv4List | ForEach-Object { Write-Host "     $_" -ForegroundColor White }
+        if ($ftp) { Write-Host ('   Port:           {0}{1}' -f $FtpPort, $(if ($FtpPort -ne 2121) { "   (add -FtpPort $FtpPort on the new PC)" } else { '' })) -ForegroundColor White }
         Write-Host ('   Pairing code:   {0} {1}' -f $pair.Code.Substring(0, 3), $pair.Code.Substring(3)) -ForegroundColor Green
-        if ($account) {
+        if ($ftp) {
+            Write-Host ('   Password:       {0}' -f (Format-FtpPassword $ftp.Password)) -ForegroundColor Green
+            if ($ftp.Fingerprint) {
+                Write-Host ('   Fingerprint:    {0}' -f (Format-Fingerprint $ftp.Fingerprint)) -ForegroundColor Green
+                Write-Host '   The new PC shows the certificate fingerprint it sees; confirm it matches this one.' -ForegroundColor DarkGray
+            } else {
+                Write-Warn 'Plain FTP: nothing is encrypted, including the password. Only use it on a network you fully trust.'
+            }
+            Write-Host '   The service is read-only, locks after 5 wrong passwords and is removed automatically when this finishes.' -ForegroundColor DarkGray
+        } elseif ($account) {
             Write-Host '   Sign in there with this temporary account (not your Microsoft account):' -ForegroundColor White
             Write-Host ('     User name:  {0}' -f $account.Name) -ForegroundColor Green
             Write-Host ('     Password:   {0}' -f $account.Password) -ForegroundColor Green
@@ -469,23 +573,37 @@ function Start-SourceMode {
             Write-Host "   (Microsoft account? use the account's e-mail address as the user name.)"
         }
         Write-Host ''
-        $bound = Wait-ForMarker -Path "$ExportDir\bound.json" -SessionId $pair.SessionId -Hint 'Waiting for the new PC to connect...  (Enter or Q cancels and reverts sharing)'
+        $bound = Wait-ForMarker -Path "$ExportDir\bound.json" -SessionId $pair.SessionId -Hint 'Waiting for the new PC to connect...  (Enter or Q cancels and reverts everything)'
         if (-not $bound) { Write-Warn 'Cancelled.'; return }
-        $ip = Resolve-BoundIP $bound
-        if ($ip) {
-            $n = Limit-SharingTo $ip $state
-            Write-Ok ('Bound to {0} at {1} (user {2}). Sharing is now limited to that address ({3} firewall rules scoped).' -f $bound.ComputerName, $ip, $bound.UserName, $n)
+        if ($ftp) {
+            $ip = Resolve-BoundIPFtp $bound $ftp.Server
+            if ($ip) {
+                $ftp.Server.AllowOnly($ip)
+                Limit-FtpFirewallTo $ip
+                $state.BoundTo = $ip; Save-PrepState $state
+                Write-Ok ('Bound to {0} at {1} (user {2}). The service now accepts that address only.' -f $bound.ComputerName, $ip, $bound.UserName)
+            } else {
+                Write-Warn ('Bound to {0} (user {1}) but its address could not be determined; the service stays open to the local subnet.' -f $bound.ComputerName, $bound.UserName)
+            }
         } else {
-            Write-Warn ('Bound to {0} (user {1}) but its address could not be determined; sharing stays open to the local network.' -f $bound.ComputerName, $bound.UserName)
+            $ip = Resolve-BoundIP $bound
+            if ($ip) {
+                $n = Limit-SharingTo $ip $state
+                Write-Ok ('Bound to {0} at {1} (user {2}). Sharing is now limited to that address ({3} firewall rules scoped).' -f $bound.ComputerName, $ip, $bound.UserName, $n)
+            } else {
+                Write-Warn ('Bound to {0} (user {1}) but its address could not be determined; sharing stays open to the local network.' -f $bound.ComputerName, $bound.UserName)
+            }
         }
 
         Write-Stage 'S5' 'Wait for the transfer'
         $done = Wait-ForMarker -Path "$ExportDir\done.json" -SessionId $pair.SessionId -Hint 'Leave this window open. It cleans up by itself when the new PC reports it is done.  (Enter finishes early)'
         if ($done) { Write-Ok ('New PC finished at {0}: {1}' -f $done.FinishedAt, $done.Summary) }
+        if ($ftp) { Write-Host ('   The service delivered {0} files, {1:N1} MB.' -f $ftp.Server.FilesServed, ($ftp.Server.BytesServed / 1MB)) -ForegroundColor Gray }
     }
     catch { Write-Warn "Stopped: $($_.Exception.Message)" }
     finally {
         Set-KeepAwake $false
+        if ($ftp) { try { $ftp.Server.Dispose() } catch {} }     # stop listening and drop the certificate before the export goes
         Start-SourceCleanup
     }
 }
@@ -646,6 +764,70 @@ function Disconnect-OldPC([string]$Share) {
     Remove-SmbMapping -RemotePath $Share -Force -ErrorAction SilentlyContinue
 }
 
+# What does the old PC offer? Ftps or Ftp if its service port answers, otherwise the SMB admin share.
+function Resolve-DestTransport {
+    if ($Transport -ne 'Auto') { return $Transport }
+    Import-WttFtp
+    Write-Step "Looking for the old PC's FTP service on port $FtpPort"
+    $found = [Wtt.FtpClient]::Probe($script:IP, $FtpPort)
+    if ($found) { return $found }
+    Write-Host '    No FTP service answered; trying the SMB admin share instead.' -ForegroundColor DarkGray
+    return 'Smb'
+}
+
+# FTP / FTPS counterpart of Connect-OldPC. With FTPS the certificate is checked BEFORE any password is sent:
+# either against -Fingerprint, or by showing it so you can compare it with the old PC's screen. From then on
+# only that exact certificate is accepted. Keeps the connection details in $script:FtpConn.
+function Connect-OldPCFtp([string]$Mode) {
+    Import-WttFtp
+    $tls = ($Mode -eq 'Ftps')
+    $given = if ($Fingerprint) { ($Fingerprint -replace '[^0-9A-Fa-f]', '') } else { $null }
+    if ($Fingerprint -and $given.Length -lt 32) { throw '-Fingerprint needs at least the first 32 hex digits (as shown on the old PC).' }
+    $pin = $null
+    if ($tls) {
+        $probe = New-Object Wtt.FtpClient $script:IP, $FtpPort, $true, $given
+        try { $probe.Connect() }
+        catch { throw ("Cannot set up a secure connection to {0}:{1} - {2}`n  Same network? Is the old PC waiting in stage S4? Is port {1} the one it shows (-FtpPort)?" -f $script:IP, $FtpPort, $_.Exception.Message) }
+        finally { $probe.Dispose() }
+        $fp = $probe.Fingerprint
+        $shown = Format-Fingerprint $fp
+        if ($given) {
+            Write-Ok "Certificate matches the fingerprint you gave ($shown)"
+            $pin = $given
+        } else {
+            Write-Host ''
+            Write-Host "  Certificate fingerprint presented by $($script:IP):  $shown" -ForegroundColor Green
+            Write-Host '  It must be identical to the Fingerprint line on the OLD PC screen. If it is not, something else is answering on that address.' -ForegroundColor Yellow
+            if ((Read-Host '  Does it match? (y/N)') -notmatch '^y') { throw 'Fingerprint not confirmed. Nothing was sent to that server.' }
+            $pin = $fp          # from here on only this exact certificate is accepted
+        }
+    } else {
+        Write-Warn 'Plain FTP: the password and all your files cross the network unencrypted.'
+    }
+
+    $sec = Read-Host '  Password shown on the OLD PC' -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    try { $typed = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    $conn = New-Object Wtt.FtpConn
+    $conn.Host = $script:IP; $conn.Port = $FtpPort; $conn.Tls = $tls; $conn.Pin = $pin
+    $conn.User = $FtpUser; $conn.Pass = (ConvertFrom-TypedFtpPassword $typed)
+    try { $c = $conn.Open(); $c.Dispose() }
+    catch { throw ("Could not sign in to the old PC: {0}" -f $_.Exception.Message) }
+    $script:FtpConn = $conn
+}
+
+function Send-FtpMarker([string]$Name, $Data) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($Data | ConvertTo-Json))
+    $c = $script:FtpConn.Open()
+    try { $c.Upload("/pkg/$Name", $bytes) } finally { $c.Dispose() }
+}
+
+# Path of a profile-relative folder as the old PC's service names it.
+function Get-RemoteProfilePath([string]$Rel) {
+    if ($Rel -eq '.') { return '/profile' }
+    return ('/profile/' + ($Rel -replace '\\', '/').Trim('/'))
+}
+
 # Checks the pairing code against pair.json on the old PC. Returns the pair record, or $null if the export has none.
 function Confirm-Pairing {
     $pf = "$script:Pkg\pair.json"
@@ -664,7 +846,11 @@ function Confirm-Pairing {
 }
 
 function Write-Marker([string]$Name, $Data) {
-    try { $Data | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:Pkg $Name) -Encoding UTF8; return $true }
+    try {
+        if ($script:Transport -eq 'Smb') { $Data | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:Pkg $Name) -Encoding UTF8 }
+        else { Send-FtpMarker $Name $Data }
+        return $true
+    }
     catch { Write-Warn "Could not write $Name to the old PC ($($_.Exception.Message))."; return $false }
 }
 
@@ -683,6 +869,7 @@ function Invoke-Robo {
     while (-not $p.HasExited) {
         $tail = ''
         try { $tail = (Get-Content -LiteralPath $script:RoboLog -Tail 1 -ErrorAction Stop | Out-String).Trim() } catch {}
+        if (-not $tail) { $tail = 'working...' }       # Write-Progress rejects an empty -Status, and robocopy's log starts with blank lines
         Write-Progress -Activity "Copying: $Label" -Status $tail
         Start-Sleep -Milliseconds 400
     }
@@ -691,8 +878,39 @@ function Invoke-Robo {
     return $p.ExitCode
 }
 
+# FTP / FTPS counterpart of Invoke-Robo: mirror a folder (or a few named files) from the old PC, with progress.
+# Same rules as robocopy /E /XO: junctions are never followed, newer files on this PC are kept.
+# Returns the finished job (Missing, Copied, Skipped, Failed, Errors).
+function Invoke-FtpCopy {
+    param([string]$Remote, [string]$Dst, [string[]]$Files, [string[]]$XD, [string]$Label, [switch]$IgnoreDryRun)
+    $xf = $null; if (-not $Files) { $xf = [string[]]@('desktop.ini', 'Thumbs.db') }
+    $dry = [bool]($DryRun -and -not $IgnoreDryRun)        # the export package itself is always fetched, even in a dry run
+    $job = [Wtt.FtpMirror]::Start($script:FtpConn, $Remote, $Dst, $Files, $XD, $xf, [Math]::Min($Threads, 8), $dry)
+    while (-not $job.Done) {
+        $status = '{0} of {1} files, {2:N0} of {3:N0} MB' -f $job.Copied, $job.FilesTotal, ($job.BytesDone / 1MB), ($job.BytesTotal / 1MB)
+        $pct = 0; if ($job.BytesTotal -gt 0) { $pct = [Math]::Min(100, [int](100 * $job.BytesDone / $job.BytesTotal)) }
+        Write-Progress -Activity "Copying: $Label" -Status $status -PercentComplete $pct
+        Start-Sleep -Milliseconds 400
+    }
+    Write-Progress -Activity "Copying: $Label" -Completed
+    if ($job.Fatal) { throw $job.Fatal }
+    if ($script:RoboLog) {
+        $lines = @('{0}  {1}: {2} copied, {3} skipped, {4} failed' -f (Get-Date -Format 's'), $Remote, $job.Copied, $job.Skipped, $job.Failed)
+        foreach ($e in @($job.Errors)) { $lines += "    $e" }
+        Add-Content -LiteralPath $script:RoboLog -Value $lines
+    }
+    return $job
+}
+
 function Copy-Spec {
-    param([string]$SrcPath, [string]$DstPath, [string[]]$Files, [string[]]$XD, [string]$Label)
+    param([string]$SrcPath, [string]$DstPath, [string[]]$Files, [string[]]$XD, [string]$Label, [string]$RemotePath)
+    if ($script:Transport -ne 'Smb') {
+        $j = Invoke-FtpCopy -Remote $RemotePath -Dst $DstPath -Files $Files -XD $XD -Label $Label
+        if ($j.Missing) { Mark 0 "$Label not on old PC (skipped)"; return }
+        if ($j.Failed -gt 0) { Mark 2 ('{0}: {1} file(s) failed (see log)' -f $Label, $j.Failed); return }
+        $script:DidWork = $true
+        return
+    }
     $rc = Invoke-Robo -Src $SrcPath -Dst $DstPath -Files $Files -XD $XD -Label $Label
     if ($rc -eq -1) { Mark 0 "$Label not on old PC (skipped)"; return }
     if ($rc -ge 8)  { Mark 2 "$Label had copy errors (see log)"; return }
@@ -778,7 +996,7 @@ function Invoke-Special {
             # Prefer the copy in the export; fall back to the original path on the old PC.
             $src = $null
             if ($script:Manifest.WallpaperFile) { $c = Join-Path $script:Pkg $script:Manifest.WallpaperFile; if (Test-Path -LiteralPath $c) { $src = $c } }
-            if (-not $src -and $script:Manifest.Wallpaper) { $c = ConvertTo-Unc $script:Manifest.Wallpaper; if ($c -and (Test-Path -LiteralPath $c)) { $src = $c } }
+            if (-not $src -and $script:Transport -eq 'Smb' -and $script:Manifest.Wallpaper) { $c = ConvertTo-Unc $script:Manifest.Wallpaper; if ($c -and (Test-Path -LiteralPath $c)) { $src = $c } }
             if (-not $src) { Mark 0 'wallpaper file not found (skipped)'; return }
             if ($DryRun) { Mark 0 'dry run: wallpaper not changed'; $script:DidWork = $true; return }
             $dstDir = Join-Path $script:NewProfile 'Pictures\Wallpaper'; New-Item -ItemType Directory -Force $dstDir | Out-Null
@@ -816,14 +1034,19 @@ function Invoke-CatalogItem($it) {
     try {
         if ($it.Kill -and -not $DryRun) { $it.Kill | ForEach-Object { Stop-Process -Name $_ -Force -ErrorAction SilentlyContinue } }
         if ($it.Known) {
-            $srcPath = ConvertTo-Unc $script:Manifest.KnownFolders.($it.Known)
-            if (-not $srcPath) { Mark 2 'folder is not on a local drive of the old PC' }
-            else { Copy-Spec -SrcPath $srcPath -DstPath (Get-TargetKnown $it.Known) -Label $it.Label }
+            if ($script:Transport -ne 'Smb') {
+                Copy-Spec -RemotePath "/known-$($it.Known)" -DstPath (Get-TargetKnown $it.Known) -Label $it.Label
+            } else {
+                $srcPath = ConvertTo-Unc $script:Manifest.KnownFolders.($it.Known)
+                if (-not $srcPath) { Mark 2 'folder is not on a local drive of the old PC' }
+                else { Copy-Spec -SrcPath $srcPath -DstPath (Get-TargetKnown $it.Known) -Label $it.Label }
+            }
         }
         foreach ($c in @($it.Copies)) {
             if (-not $c) { continue }
             $dstRel = if ($c.Dst) { $c.Dst } else { $c.Src }
-            Copy-Spec -SrcPath (Join-Rel $script:OldProfileUnc $c.Src) -DstPath (Join-Rel $script:NewProfile $dstRel) -Files $c.Files -XD $c.XD -Label $c.Src
+            Copy-Spec -SrcPath $(if ($script:Transport -eq 'Smb') { Join-Rel $script:OldProfileUnc $c.Src }) -RemotePath (Get-RemoteProfilePath $c.Src) `
+                -DstPath (Join-Rel $script:NewProfile $dstRel) -Files $c.Files -XD $c.XD -Label $c.Src
         }
         if ($it.Reg) { Import-RegItem $it }
         Invoke-Special $it
@@ -859,27 +1082,47 @@ function Start-DestinationMode {
 
     Write-Stage 'D2' 'Bind to the old PC'
     $saved = Read-CredentialFile -Path $CredentialFile
-    $cred = $null; $fromFile = $false
-    if ($saved) { $cred = $saved.Cred; $fromFile = $true; Write-Ok "Using saved credentials from $CredentialFile" }
     $script:IP = if ($OldPCIP) { $OldPCIP } elseif ($saved -and $saved.IP) { $saved.IP } else { Read-Host 'IP address of the OLD PC (shown by the old PC in stage S4)' }
-    if (-not (Test-Connection $script:IP -Count 1 -Quiet)) { throw "Cannot reach $($script:IP). Same network? Is the old PC waiting in stage S4?" }
-    if (-not $cred) { $cred = Get-Credential -Message "Sign-in for the OLD PC ($($script:IP)). Use the temporary account and password shown on the OLD PC's screen in stage S4 - not your Microsoft account (unless the old PC was run with -UseOwnAccount)." }
+    $script:Transport = Resolve-DestTransport
+    $script:FtpConn = $null; $script:Staging = $null
+    $share = $null; $cred = $null; $fromFile = $false
 
-    $share = "\\$($script:IP)\C$"
-    try { $usedName = Connect-OldPC -Share $share -Cred $cred }
-    catch {
-        $hint = if ($fromFile) { " Saved credentials may be outdated - delete $CredentialFile and retry." } else { '' }
-        throw "$($_.Exception.Message)$hint"
+    if ($script:Transport -eq 'Smb') {
+        if ($saved) { $cred = $saved.Cred; $fromFile = $true; Write-Ok "Using saved credentials from $CredentialFile" }
+        if (-not (Test-Connection $script:IP -Count 1 -Quiet)) { throw "Cannot reach $($script:IP). Same network? Is the old PC waiting in stage S4?" }
+        if (-not $cred) { $cred = Get-Credential -Message "Sign-in for the OLD PC ($($script:IP)). Use the temporary account and password shown on the OLD PC's screen in stage S4 - not your Microsoft account (unless the old PC was run with -UseOwnAccount)." }
+
+        $share = "\\$($script:IP)\C$"
+        try { $usedName = Connect-OldPC -Share $share -Cred $cred }
+        catch {
+            $hint = if ($fromFile) { " Saved credentials may be outdated - delete $CredentialFile and retry." } else { '' }
+            throw "$($_.Exception.Message)$hint"
+        }
+        Write-Ok "Connected to $share as $usedName"
+    } else {
+        Connect-OldPCFtp $script:Transport
+        Write-Ok ('Connected to {0}:{1} over {2}' -f $script:IP, $FtpPort, $script:Transport.ToUpper())
     }
-    Write-Ok "Connected to $share as $usedName"
 
     $results = @()
     try {
-        $script:Pkg = "$share\MigrationExport"
-        if (-not (Test-Path "$script:Pkg\manifest.json")) { throw "No export found at $script:Pkg. Run the tool on the old PC first (it must be waiting in stage S4)." }
+        if ($script:Transport -eq 'Smb') {
+            $script:Pkg = "$share\MigrationExport"
+            if (-not (Test-Path "$script:Pkg\manifest.json")) { throw "No export found at $script:Pkg. Run the tool on the old PC first (it must be waiting in stage S4)." }
+        } else {
+            # The export package (settings, app list, pairing info) is small: fetch it into a private temporary folder.
+            # Personal files are copied later, straight into their final place. The folder is deleted in the finally block.
+            $script:Staging = Join-Path ([IO.Path]::GetTempPath()) ('wtt-' + [guid]::NewGuid().ToString('N'))
+            $script:Pkg = Join-Path $script:Staging 'pkg'
+            Write-Step 'Fetching the export package'
+            $j = Invoke-FtpCopy -Remote '/pkg' -Dst $script:Pkg -Label 'export package' -IgnoreDryRun
+            if ($j.Missing -or $j.Failed -gt 0 -or -not (Test-Path "$script:Pkg\manifest.json")) {
+                throw ("The old PC has no usable export. Run the tool on the old PC first (it must be waiting in stage S4). {0}" -f (@($j.Errors) -join '; '))
+            }
+        }
         $script:Manifest = Get-Content "$script:Pkg\manifest.json" -Raw | ConvertFrom-Json
         $script:OldProfile = $script:Manifest.Profile
-        $script:OldProfileUnc = ConvertTo-Unc $script:OldProfile
+        $script:OldProfileUnc = if ($script:Transport -eq 'Smb') { ConvertTo-Unc $script:OldProfile } else { $null }
         Write-Ok ('Found export from {0} - user {1} - {2}' -f $script:Manifest.ComputerName, $script:Manifest.UserName, $script:Manifest.OS)
 
         $pair = Confirm-Pairing
@@ -887,9 +1130,11 @@ function Start-DestinationMode {
             $ok = Write-Marker 'bound.json' ([ordered]@{
                 SessionId = $pair.SessionId; ComputerName = $env:COMPUTERNAME; UserName = $env:USERNAME
                 IPs = @(Get-IPv4Addresses | ForEach-Object { $_.IPAddress }); BoundAt = (Get-Date).ToString('s'); ToolVersion = $ToolVersion })
-            if ($ok) { Write-Ok ('Bound: {0} <-> {1}. The old PC now limits sharing to this PC.' -f $script:Manifest.ComputerName, $env:COMPUTERNAME) }
+            if ($ok) { Write-Ok ('Bound: {0} <-> {1}. The old PC now accepts connections from this PC only.' -f $script:Manifest.ComputerName, $env:COMPUTERNAME) }
         }
-        if ($cred.UserName -match '^(.*\\)?WTT-[0-9a-f]{8}$') {
+        if ($script:Transport -ne 'Smb') {
+            # Nothing to save: the FTP password is random per run and stops working when the old PC cleans up.
+        } elseif ($cred.UserName -match '^(.*\\)?WTT-[0-9a-f]{8}$') {
             Write-Host 'Not offering to save credentials: this is a one-time temporary account, deleted on the old PC when the transfer finishes.' -ForegroundColor DarkGray
         } elseif (-not $fromFile -and -not $NoSave -and -not $Select -and -not $Yes) {
             if ((Read-Host "Save these credentials to $CredentialFile for next time? Password is encrypted for this user/PC only (y/N)") -match '^y') {
@@ -981,7 +1226,9 @@ function Start-DestinationMode {
     finally {
         if ($script:ShellStopped) { Start-Shell }
         if ($script:Transcribing) { try { Stop-Transcript | Out-Null } catch {} }
-        Disconnect-OldPC $share
+        if ($share) { Disconnect-OldPC $share }
+        # The staging folder holds the old PC's Wi-Fi keys in clear text: never leave it behind.
+        if ($script:Staging -and (Test-Path -LiteralPath $script:Staging)) { Remove-Item -LiteralPath $script:Staging -Recurse -Force -ErrorAction SilentlyContinue }
         Set-KeepAwake $false
     }
 }

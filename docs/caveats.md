@@ -10,36 +10,54 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 - [The tool itself](#the-tool-itself)
 
 ## Network and security
- 
-### The old PC exposes its admin share
-**What happens.** Stage S3 enables File and Printer Sharing, makes Public networks Private, and sets `LocalAccountTokenFilterPolicy=1`. Until the new PC binds in S4, anyone on the same subnet who has a working sign-in for the old PC can open `\\oldpc\C$` with full access. That sign-in is normally the temporary account S3 just created and displays in S4, not a real account - see [the temporary account](process.md#the-temporary-account) - so the window of exposure is to that one-time password, not your real one. After binding, the firewall rules are limited to the new PC's address.
-**Why.** The admin share is the only share that exists on every Windows edition without creating one, and it reaches every folder a user may have redirected.
-**Instead.** Run the transfer on a home or office network you trust, never on public Wi-Fi. Or create a dedicated read-only share by hand ([manual.md](manual.md#sharing-by-hand)) and copy with robocopy yourself; then the token-filter policy is not needed.
 
-### Wi-Fi passwords sit in clear text on the old PC
-**What happens.** `C:\MigrationExport\wifi\*.xml` contains every saved Wi-Fi key in clear text until S6 deletes the folder.
+### The old PC listens while the tool runs
+**What happens.** Between S3 and S6 the old PC accepts connections from the local network.
+- **FTPS / FTP:** one control port (default 2121) and a passive range (52100-52150) are open to the local subnet, through one inbound Windows Firewall rule. Everything needs the one-time password. A wrong password costs a second, and five wrong ones lock the service. After binding in S4 the service and the rule accept the new PC's address only.
+- **SMB:** File and Printer Sharing is enabled, Public networks become Private, and `LocalAccountTokenFilterPolicy=1` is set. Anyone on the subnet with a working sign-in can open `\\oldpc\C$` with full access. That sign-in is normally the temporary account S3 created (see [the temporary account](process.md#the-temporary-account-smb)), not a real one. After binding, the sharing firewall rules are limited to the new PC's address.
+
+**Why.** The new PC has to reach the old one somehow; the admin share is the only share that exists on every Windows edition without creating one, and the FTP service is the only thing the tool starts itself.
+**Instead.** Run the transfer on a home or office network you trust, never on public Wi-Fi. Or move the data without a network service at all (external drive, [manual.md](manual.md)).
+
+### Plain FTP is not encrypted
+**What happens.** With `-Transport Ftp` the password, the file list and every file cross the network in clear text, and nothing proves the new PC is talking to the right machine.
+**Why.** It exists for networks where TLS gets in the way and you fully trust everyone on the wire.
+**Instead.** Use FTPS (the default).
+
+### FTPS uses a self-signed certificate, so you check the fingerprint
+**What happens.** The certificate is created fresh in memory on every run and signed by itself, so there is no authority your PC could trust. The new PC shows its SHA-256 fingerprint before any password is sent, and you compare it with the old PC's screen. If you answer yes without comparing, FTPS still encrypts, but anyone who answers on the old PC's address first can collect the password.
+**Why.** A certificate from a real authority needs a name and an internet-facing issuer, neither of which two PCs on a home network have.
+**Instead.** Compare the two fingerprints (the first 32 hex digits are shown), or pass `-Fingerprint` / `WTT_FINGERPRINT`. TLS 1.2 is used; the tool does not negotiate anything older.
+
+### The service port must be free and reachable
+**What happens.** The old PC stops with "Could not start the service on port 2121" if another program uses it. The new PC reports it cannot set up a connection if a firewall, antivirus, Wi-Fi client isolation (guest networks) or a different subnet or VLAN sits between the PCs.
+**Why.** The tool only adds a rule to Windows Firewall; it cannot see third-party firewalls or router settings. The rule allows the local subnet, and the service is IPv4 only.
+**Instead.** Pick another port with `-FtpPort` (or `WTT_FTPPORT`) on both PCs, put both PCs on the same normal network, or use `-Transport Smb` where only SMB is open. ICMP ping is not needed.
+
+### Wi-Fi passwords sit in clear text
+**What happens.** `C:\MigrationExport\wifi\*.xml` on the old PC contains every saved Wi-Fi key in clear text until S6 deletes the folder. Over FTP/FTPS the new PC also keeps a copy of the whole export package in `%TEMP%\wtt-<guid>` for the duration of the run.
 **Why.** `netsh wlan export profile key=clear` is the only way to carry keys between PCs.
-**Instead.** Untick "Saved Wi-Fi networks" and type the keys on the new PC, or make sure S6 ran (`-Cleanup` if the window was closed).
+**Instead.** Untick "Saved Wi-Fi networks" and type the keys on the new PC, make sure S6 ran (`-Cleanup` if the window was closed), and delete a leftover `%TEMP%\wtt-*` folder if the new PC's window was killed.
 
 ### The pairing code is a confirmation, not a secret
 **What happens.** The six-digit code proves the new PC is reading the export of the PC you are looking at. It does not grant or deny access.
-**Why.** Access is granted by a password over SMB - normally the temporary account's, shown on the same screen as the code - and the code only lets the old PC learn which address to trust and lets you catch a wrong IP.
-**Instead.** Nothing to do; just do not treat the code as the secret. The account password shown next to it is the actual secret for this run.
+**Why.** Access is granted by a password - the FTP/FTPS one-time password, or the temporary SMB account's - shown on the same screen as the code. The code only lets the old PC learn which address to trust and lets you catch a wrong IP.
+**Instead.** Nothing to do; just do not treat the code as the secret. The password shown next to it is the actual secret for this run.
 
-### If the old PC window is closed, sharing stays open
-**What happens.** S6 only runs when S4/S5 finish or fail inside the script. Closing the window skips it.
-**Instead.** Run `Migrate-Windows.ps1 -Cleanup` elevated, or revert by hand ([manual.md](manual.md#reverting-the-sharing-changes-by-hand)).
+### If the old PC window is closed, the firewall rule or sharing stays
+**What happens.** S6 only runs when S4/S5 finish or fail inside the script. Closing the window skips it. For FTP/FTPS the server dies with the window, but the firewall rule stays; for SMB the sharing changes and the temporary account stay.
+**Instead.** Run `Migrate-Windows.ps1 -Cleanup` elevated, or revert by hand ([manual.md](manual.md#reverting-by-hand)).
 
 ### `irm | iex` runs whatever the URL serves
-**What happens.** The bootstrap executes a script straight from GitHub.
-**Instead.** Pin a release with `$env:WTT_REF='v0.2.0'`, or download `bootstrap.ps1` and `Migrate-Windows.ps1`, read them, and run them locally (`Start-Migration.cmd`).
+**What happens.** The bootstrap executes a script straight from GitHub, and so does the compiled `lib/WttFtp.cs` it downloads next to it.
+**Instead.** Pin a release or commit with `$env:WTT_REF='<tag or sha>'`, or download `bootstrap.ps1`, `Migrate-Windows.ps1` and `lib/WttFtp.cs`, read them, and run them locally (`Start-Migration.cmd`). The bootstrap prints a SHA-256 of both files so you can compare them with what you reviewed.
 
 ## Accounts and sign-in
 
 ### You do not need the Microsoft account password at all
-**What happens.** By default (no `-UseOwnAccount`), S3 creates a disposable local administrator account on the old PC just for this transfer, and D2's sign-in prompt expects that account's name and password, shown on the old PC's screen in S4 - not the real Microsoft account. You never need to know, type or have access to the real account's password, which also means a lost or reset password, or a work PC where someone else holds that password, no longer blocks the transfer.
-**Why.** SMB needs a password-equivalent credential even to just read the pairing file; a Windows Hello PIN or biometric sign-in on the old PC is not one, and the real Microsoft account password is often unavailable, not worth exposing over the network, or both.
-**Instead.** Pass `-UseOwnAccount` on the old PC only if you deliberately want to sign in with a real account instead - then the old PC's share sign-in works with the account e-mail, sometimes only as `MicrosoftAccount\you@outlook.com` (the tool tries both forms).
+**What happens.** With FTPS or FTP no Windows account takes part: the new PC signs in with a random one-time password shown on the old PC's screen. With SMB (without `-UseOwnAccount`), S3 creates a disposable local administrator account on the old PC and D2 expects that account's name and password instead. Either way you never need to know, type or have access to the real account's password, which also means a lost or reset password, or a work PC where someone else holds it, no longer blocks the transfer.
+**Why.** SMB needs a password-equivalent credential even to read the pairing file; a Windows Hello PIN or biometric sign-in on the old PC is not one, and the real Microsoft account password is often unavailable, not worth exposing over the network, or both. The FTP service sidesteps Windows sign-in completely.
+**Instead.** Pass `-Transport Smb -UseOwnAccount` on the old PC only if you deliberately want to sign in with a real account instead - then the old PC's share sign-in works with the account e-mail, sometimes only as `MicrosoftAccount\you@outlook.com` (the tool tries both forms).
 
 ### Elevating with another account migrates the wrong profile
 **What happens.** If a standard user elevates by typing a different administrator's password, `HKCU` and `%USERPROFILE%` inside that window belong to the administrator. The tool compares the owner of Explorer with the current user and stops when they differ.
@@ -58,26 +76,35 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 ## Files
 
 ### OneDrive folders on both PCs
-**What happens.** When Desktop, Documents or Pictures is inside OneDrive on both PCs and both sign in to the same account, copying creates duplicates or "- Copy" conflicts and forces cloud-only placeholders on the old PC to download over SMB. The plan step warns about this.
+**What happens.** When Desktop, Documents or Pictures is inside OneDrive on both PCs and both sign in to the same account, copying creates duplicates or "- Copy" conflicts and forces cloud-only placeholders on the old PC to download while they are read. The plan step warns about this.
 **Instead.** Untick those folders and let OneDrive sync them. Only copy folders that are not under OneDrive on at least one side.
 
 ### Newer files on the new PC are kept
-**What happens.** robocopy runs with `/XO`: if a file already exists on the new PC with a newer timestamp, the old PC's copy is skipped.
-**Why.** Protects work done on the new PC before the transfer.
+**What happens.** robocopy runs with `/XO`, and the FTP mirror follows the same rule: if a file already exists on the new PC with a newer timestamp, or the same timestamp and size, the old PC's copy is skipped.
+**Why.** Protects work done on the new PC before the transfer, and makes a second run cheap.
 **Instead.** If you really want the old PC's version, delete the file on the new PC first or copy that file by hand.
 
 ### Folders redirected to a network drive
-**What happens.** If Documents on the old PC points at `\\server\share`, the item is skipped with "not on a local drive".
+**What happens.** If Documents on the old PC points at `\\server\share`, the item is skipped ("not on a local drive" over SMB, "not on old PC" over FTP/FTPS).
 **Instead.** Point the new PC's Documents at the same server location (Properties > Location).
 
 ### Files in use and long paths
-**What happens.** Open files (Outlook `.pst`, databases) fail with "sharing violation"; paths over 260 characters may fail.
-**Instead.** Close Outlook and other apps on the old PC before S2. Rerun just that item afterwards; the robocopy log names every failed file.
+**What happens.** Open files (Outlook `.pst`, databases) fail with "sharing violation" or "in use"; paths over 260 characters may fail. The item ends as WARN and the other files are still copied.
+**Instead.** Close Outlook and other apps on the old PC before S2. Rerun just that item afterwards; the log names every failed file.
 
 ### Permissions and ownership
-**What happens.** Files are copied with data, attributes and timestamps (`/COPY:DAT`), not with their ACLs. They inherit the new PC's profile permissions.
+**What happens.** Files are copied with data, attributes and timestamps over SMB (`/COPY:DAT`), not with their ACLs. They inherit the new PC's profile permissions.
 **Why.** Old-PC ACLs reference SIDs that do not exist on the new PC.
 **Instead.** Nothing to do for personal files. For `.ssh` keys the inherited profile permissions are what OpenSSH expects.
+
+### FTP and FTPS copy less metadata than robocopy
+**What happens.** Over FTP/FTPS the file contents and each file's modified time (to the second) are copied. Not copied: attributes (Hidden, Read-only, System), ACLs, creation and access times, folder timestamps, and alternate data streams such as the "downloaded from the internet" mark. Empty folders are created. Directory junctions and symbolic links are skipped, as with robocopy `/XJ`.
+**Why.** FTP has no way to carry them, and recreating them would need a second, Windows-only channel.
+**Instead.** Use `-Transport Smb` if hidden or read-only attributes matter. For a few files, re-apply attributes by hand afterwards.
+
+### FTP and FTPS are slower for many small files
+**What happens.** Every file needs its own data connection (and, for FTPS, its own TLS handshake). The mirror runs up to eight connections in parallel (`-Threads`), which hides most of it, but a folder of tens of thousands of tiny files is still slower than robocopy over SMB. A failed file is retried three times from its start; there is no resume inside a file.
+**Instead.** Rerun after an interruption: files that are already complete are skipped. Use `-Transport Smb` for huge trees of small files.
 
 ## Apps
 
@@ -142,17 +169,21 @@ What the tool cannot do, does imperfectly, or does in a way you should know abou
 
 ## The tool itself
 
-### Untested draft
-The script parses on Windows PowerShell 5.1 and PowerShell 7 and the pure functions are unit-checked, but no end-to-end run between two real PCs has been recorded yet. Use `-DryRun` first, and keep the old PC until the new one is verified.
+### Tested on loopback, not yet between two PCs
+The FTP/FTPS server and client are tested against each other and against `curl` on one machine in Windows PowerShell 5.1 and PowerShell 7: login and lockout, listing, hidden files, refused paths (parent folders, junctions, device names, alternate streams), uploads, pinning, resume of a second run, locked files, parallel copies. The script's stages around them are exercised with stand-ins for the firewall and prompts. **Not yet exercised: creating the Windows Firewall rule (needs an elevated window) and a real run between two PCs.** Use `-DryRun` first, and keep the old PC until the new one is verified.
+
+### The first start compiles a small C# file
+**What happens.** `Add-Type` compiles `lib/WttFtp.cs` when FTP or FTPS is used, which takes a second or two and needs the file next to the script. It fails where PowerShell runs in Constrained Language Mode (AppLocker or Windows Defender Application Control policies on managed PCs).
+**Instead.** Keep the `lib` folder with the script (the bootstrap does), or use `-Transport Smb` on such a PC.
 
 ### Windows PowerShell 5.1 is the default host
-`bootstrap.ps1` runs in whichever PowerShell you paste it into; `Start-Migration.cmd` always uses Windows PowerShell 5.1. The script is written ASCII-only for that reason.
+`bootstrap.ps1` runs in whichever PowerShell you paste it into; `Start-Migration.cmd` always uses Windows PowerShell 5.1. The script is written ASCII-only, and the C# file is ASCII-only and C# 5 compatible, for that reason.
 
 ### The pairing code wait is not a timeout
-S4 and S5 wait until a marker appears or you press Enter. A PC that goes to sleep breaks SMB; the tool asks Windows to stay awake while it runs, but a lid close still sleeps a laptop.
+S4 and S5 wait until a marker appears or you press Enter. A PC that goes to sleep breaks the connection; the tool asks Windows to stay awake while it runs, but a lid close still sleeps a laptop.
 
 ### Keep-awake is best effort
 `SetThreadExecutionState` is per thread; PowerShell normally runs the script on one thread, but a host that switches threads will drop the request. Plug both PCs in and set sleep to Never for the duration if the transfer is large.
 
 ### Interrupted runs
-Ctrl+C on the new PC leaves the SMB connection open until the window closes and may leave Explorer stopped. Run `explorer` from Task Manager if needed, then rerun; robocopy skips files that are already there.
+Ctrl+C on the new PC may leave Explorer stopped (run `explorer` from Task Manager) and, over SMB, leaves the connection open until the window closes. Over FTP/FTPS the temporary export folder in `%TEMP%` is normally removed even then; if the window was killed, delete `%TEMP%\wtt-*` yourself. Rerun afterwards: robocopy and the FTP mirror both skip files that are already there.
