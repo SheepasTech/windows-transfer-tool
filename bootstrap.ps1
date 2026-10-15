@@ -41,6 +41,22 @@ function Test-Admin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# Bootstrap log: every window (the first one and the elevated one) writes its own file, one line at a time, so a crash
+# or a closed window still leaves everything up to that point. Layout: Temp\Debug\<project>\<date>\<file>.
+$script:BootLog = $null
+try {
+    $d = Join-Path $env:TEMP ('Debug\WindowsTransferTool\{0}' -f (Get-Date -Format 'yyyy-MM-dd'))
+    New-Item -ItemType Directory -Force $d | Out-Null
+    $script:BootLog = Join-Path $d ('bootstrap-{0}-pid{1}-{2}.log' -f $(if (Test-Admin) { 'admin' } else { 'user' }), $PID, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+} catch {}
+function Write-BootLog([string]$Msg) {
+    if (-not $script:BootLog) { return }
+    try { Add-Content -LiteralPath $script:BootLog -Value ('{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Msg) -Encoding UTF8 } catch {}
+}
+Write-BootLog ("start: pid {0}, admin {1}, PS {2}, repo {3} @ {4}, WTT_ROLE='{5}' WTT_TRANSPORT='{6}'" -f $PID, (Test-Admin), $PSVersionTable.PSVersion, $Repo, $Ref, $env:WTT_ROLE, $env:WTT_TRANSPORT)
+
+try {
+
 Write-Host ''
 Write-Host "  Windows Transfer Tool - bootstrap  ($Repo @ $Ref)" -ForegroundColor White
 
@@ -93,6 +109,7 @@ if (-not $env:WTT_DRYASKED -and ($role -eq 'Destination' -or ($role -eq 'Source'
 }
 Remove-Item Env:WTT_DRYASKED -ErrorAction SilentlyContinue     # one-shot: the elevated window must not skip the question on its next run
 
+Write-BootLog ("choices: role {0}, transport {1}, dry run {2}" -f $role, $transport, $wttDry)
 # ---- 2. elevate --------------------------------------------------------------
 if ($role -ne 'Download' -and -not (Test-Admin)) {
     Write-Host '  Administrator rights are needed - a UAC prompt follows. The tool continues in the new window.' -ForegroundColor Yellow
@@ -106,6 +123,7 @@ if ($role -ne 'Download' -and -not (Test-Admin)) {
         if ($val) { $pre += "`$env:$v='$val'; " }
     }
     $cmd = $pre + "irm '$($Base)bootstrap.ps1' | iex"
+    Write-BootLog "not elevated: starting an elevated window (it writes its own bootstrap and debug logs)"
     Start-Process $exe -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-NoExit','-Command',$cmd
     return
 }
@@ -123,7 +141,9 @@ function Get-ToolFile([string]$Rel) {
 }
 
 $script = Get-ToolFile $Main
+Write-BootLog "downloaded $Main"
 $libFile = Get-ToolFile $Lib
+Write-BootLog "downloaded $Lib"
 
 $tokens = $null; $errors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$errors)
@@ -150,4 +170,12 @@ if ($wttDry -and ($role -eq 'Destination' -or $transport -eq 'Drive')) { $extra.
 if ($env:WTT_FINGERPRINT -and $role -eq 'Destination') { $extra.Fingerprint = $env:WTT_FINGERPRINT }
 Write-Host ("  Starting {0} mode..." -f $role) -ForegroundColor White
 Write-Host ("  Running: Migrate-Windows.ps1 -Mode {0} {1}" -f $role, (($extra.GetEnumerator() | ForEach-Object { if ($_.Value -is [bool]) { "-$($_.Key)" } else { "-$($_.Key) $($_.Value)" } }) -join " ")) -ForegroundColor DarkGray
+Write-BootLog ("launching: Migrate-Windows.ps1 -Mode {0} {1}" -f $role, (($extra.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join " "))
 & $script -Mode $role @extra
+Write-BootLog "tool returned"
+} catch {
+    Write-BootLog ("ERROR: {0}`n{1}" -f $_.Exception.Message, $_.ScriptStackTrace)
+    Write-Host ("  Bootstrap failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    if ($script:BootLog) { Write-Host ("  Details: {0}" -f $script:BootLog) -ForegroundColor Yellow }
+    throw
+}

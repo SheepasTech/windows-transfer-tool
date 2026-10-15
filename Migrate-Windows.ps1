@@ -1729,6 +1729,10 @@ try {
     if ($Mode -eq 'Source') {
         if ($Transport -eq 'Drive') { Start-DriveSourceMode } else { Start-SourceMode }
     } else { Start-DestinationMode }
+} catch {
+    # Put the failure in the transcript (with the line and stack) before the window can close; then fail as before.
+    Write-Host ("FAILED: {0}`n{1}`n{2}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage, $_.ScriptStackTrace) -ForegroundColor Red
+    throw
 } finally {
     if ($script:Transcribing) { try { Stop-Transcript | Out-Null } catch {}; $script:Transcribing = $false }
     Hide-LogSecrets

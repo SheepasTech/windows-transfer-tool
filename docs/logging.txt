@@ -61,3 +61,29 @@ Limits:
     sensitive data into the console during a run.
   - Saved Wi-Fi passwords are written to files in the export package, never printed, so
     they are not in the log.
+
+Each window logs for itself
+---------------------------
+The bootstrap starts a second, elevated window (UAC) and exits in the first one. Every
+window writes its own file, so a crash or a closed window never takes the earlier log with it:
+
+  bootstrap-user-pid<N>-<yyyy-MM-dd_HH-mm-ss>.log    first (non-elevated) window
+  bootstrap-admin-pid<N>-<yyyy-MM-dd_HH-mm-ss>.log   elevated window
+  debug-<source|destination>-<yyyy-MM-dd_HH-mm-ss>.log   the tool itself (transcript)
+
+The bootstrap log is appended one line at a time (role, transport, dry-run answer, each
+download, the exact launch parameters, and any error with its stack trace), so it is on
+disk even if the process dies. If the bootstrap fails it prints "Details: <path>".
+If the tool itself fails, it writes "FAILED: <message>", the line and the stack trace into
+its transcript before the window can close, then stops as before. All of this is wrapped
+in try/catch; if the log folder cannot be written, the tool still runs and only warns.
+
+Convention for other tools (e.g. the Office install tool)
+---------------------------------------------------------
+Use the same layout so one shortcut finds everything:
+  Log files:  %TEMP%\Debug\<ProjectName>\<yyyy-MM-dd>\<kind>-<yyyy-MM-dd_HH-mm-ss>.log
+  Shortcut:   Desktop\Debug.lnk  ->  %TEMP%\Debug   (shared by all projects; ask before creating)
+  One file per process/window; elevated and nested windows write their own files.
+  Append line by line, or use a transcript, so a crash keeps what was written.
+  Hash any secret that is printed (see the privacy section above).
+  Never let logging stop the tool: wrap every log call in try/catch.
