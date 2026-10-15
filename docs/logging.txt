@@ -11,9 +11,10 @@ Where the logs are
 
 What is written there
 ---------------------
-  debug-source-<date>-<time>.log        full console transcript of an old-PC run
-  debug-destination-<date>-<time>.log   full console transcript of a new-PC run
-  robocopy-<date>-<time>.log            robocopy's own log (new PC)
+  debug-source-<yyyy-MM-dd_HH-mm-ss>.log        full console transcript of an old-PC run
+  debug-destination-<yyyy-MM-dd_HH-mm-ss>.log   full console transcript of a new-PC run
+  robocopy-<yyyy-MM-dd_HH-mm-ss>.log            robocopy's own log (new PC)
+  Example: debug-destination-2026-10-15_14-30-05.log
 
 The transcript is started by Start-DebugLog in Migrate-Windows.ps1 as soon as the
 tool knows whether this is the old or the new PC. It is stopped when the tool ends,
@@ -29,10 +30,10 @@ Not in the temp folder
 Desktop shortcut
 ----------------
 At the start of each run the tool looks for the shortcut
-  Desktop\Debug\WindowsTransferTool logs.lnk
-It opens %TEMP%\Debug\WindowsTransferTool, so every day's folder is reachable.
+  Desktop\Debug.lnk
+It opens %TEMP%\Debug, the whole debug folder, so every project and day is reachable.
   - If it exists, nothing happens.
-  - If it is missing, the tool asks: Put a log shortcut in Desktop\Debug? (Y/n)
+  - If it is missing, the tool asks: Put a "Debug" shortcut (to the log folder) on the desktop? (Y/n)
     Enter creates it. n skips it (it asks again next run).
   - With -Yes, or when the tool is not interactive, it creates the shortcut without asking.
   - If the shortcut cannot be created, the tool prints a warning with the folder path.

@@ -1615,7 +1615,7 @@ function Start-DestinationMode {
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $script:BackupDir = Join-Path $migDir "registry-backup-$stamp"
         New-Item -ItemType Directory -Force $script:BackupDir | Out-Null
-        $script:RoboLog = Join-Path $script:LogDir "robocopy-$stamp.log"
+        $script:RoboLog = Join-Path $script:LogDir "robocopy-$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 
         foreach ($st in $StageNames) {
             Write-Stage $codes[$st] $st
@@ -1702,23 +1702,22 @@ function Hide-LogSecrets {
     } catch { Write-Warn "Could not hash the secrets in the debug log: $($_.Exception.Message). Delete $($script:LogFile) before sharing it." }
 }
 function Start-DebugLog {
-    $projectLogs = Join-Path $env:TEMP 'Debug\WindowsTransferTool'                 # Temp\Debug\<project>\<date>\<file>
+    $debugRoot = Join-Path $env:TEMP 'Debug'   # Temp\Debug\<project>\<date>\<file>
+    $projectLogs = Join-Path $debugRoot 'WindowsTransferTool'
     $script:LogDir = Join-Path $projectLogs (Get-Date -Format 'yyyy-MM-dd')
     try {
         New-Item -ItemType Directory -Force $script:LogDir | Out-Null
-        $tp = Join-Path $script:LogDir ('debug-{0}-{1}.log' -f $Mode.ToLower(), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $tp = Join-Path $script:LogDir ('debug-{0}-{1}.log' -f $Mode.ToLower(), (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
         Start-Transcript -Path $tp | Out-Null
         $script:LogFile = $tp; $script:Transcribing = $true
         Write-Host "Debug log: $script:LogDir" -ForegroundColor DarkGray
     } catch { Write-Warn "Could not start the debug log in $($script:LogDir): $($_.Exception.Message)" }
     try {
-        $lnkDir = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Debug'
-        $lnk = Join-Path $lnkDir 'WindowsTransferTool logs.lnk'
+        $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Debug.lnk'      # Desktop\Debug -> Temp\Debug
         if (-not (Test-Path -LiteralPath $lnk)) {
-            $make = $Yes -or -not (Test-Interactive) -or ((Read-Host '  Put a log shortcut in Desktop\Debug? (Y/n)') -notmatch '^n')
+            $make = $Yes -or -not (Test-Interactive) -or ((Read-Host '  Put a "Debug" shortcut (to the log folder) on the desktop? (Y/n)') -notmatch '^n')
             if ($make) {
-                New-Item -ItemType Directory -Force $lnkDir | Out-Null
-                $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $sc.TargetPath = $projectLogs; $sc.Save()
+                $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $sc.TargetPath = $debugRoot; $sc.Save()
                 Write-Ok "Shortcut created: $lnk"
             }
         }
