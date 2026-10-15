@@ -1,0 +1,47 @@
+DEBUG LOGGING
+=============
+
+Debug logging is always on. It cannot be switched off, on the old PC or the new PC.
+
+Where the logs are
+------------------
+  %TEMP%\WindowsTransferTool\logs
+  (usually C:\Users\<you>\AppData\Local\Temp\WindowsTransferTool\logs)
+
+What is written there
+---------------------
+  debug-source-<date>-<time>.log        full console transcript of an old-PC run
+  debug-destination-<date>-<time>.log   full console transcript of a new-PC run
+  robocopy-<date>-<time>.log            robocopy's own log (new PC)
+
+The transcript is started by Start-DebugLog in Migrate-Windows.ps1 as soon as the
+tool knows whether this is the old or the new PC. It is stopped when the tool ends,
+including after an error. Every run makes a new file; old files are never overwritten.
+
+Not in the temp folder
+----------------------
+  - With -Transport Drive on the old PC, the robocopy log is also written to
+    WTT-Transfer\logs on the drive.
+  - Registry backups and the installed-apps CSV on the new PC stay in
+    %USERPROFILE%\Migration. They are reports, not debug logs.
+
+Desktop shortcut
+----------------
+At the start of each run the tool looks for "Transfer logs.lnk" on the desktop.
+  - If it exists, nothing happens.
+  - If it is missing, the tool asks: Put a "Transfer logs" shortcut on the desktop? (Y/n)
+    Enter creates it. n skips it (it asks again next run).
+  - With -Yes, or when the tool is not interactive, it creates the shortcut without asking.
+  - If the shortcut cannot be created, the tool prints a warning with the folder path.
+
+The bootstrap (bootstrap.ps1) prints "Running: Migrate-Windows.ps1 -Mode ..." with the
+exact parameters it passes to the tool. That line is part of the transcript.
+
+Privacy: read before sending a log to anyone
+--------------------------------------------
+A transcript records everything printed on screen. On the old PC this includes the
+one-time sign-in details the tool displays for the new PC (the temporary account and
+password for SMB, the FTPS/FTP password, and the pairing code). Those values stop
+working when the old PC finishes or cleans up, but the log still contains them. Delete
+the files in the logs folder when you are done, and do not post them unredacted.
+Saved Wi-Fi passwords are not printed, so they are not in the logs.

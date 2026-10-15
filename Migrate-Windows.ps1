@@ -1491,7 +1491,7 @@ function Start-DestinationMode {
     Assert-SignedInUser
     Set-KeepAwake $true
     $script:NewProfile = $env:USERPROFILE
-    $script:ShellStopped = $false; $script:PendingWallpaper = $null; $script:Transcribing = $false
+    $script:ShellStopped = $false; $script:PendingWallpaper = $null
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Write-Warn 'winget not found; the app reinstall item will be skipped (install "App Installer" from the Microsoft Store).' }
     Write-Host ("Receiving into profile '{0}' ({1})" -f $env:USERNAME, $script:NewProfile) -ForegroundColor White
     Write-Ok 'Preflight passed.'
@@ -1610,14 +1610,8 @@ function Start-DestinationMode {
         $script:ReportDir = $migDir
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $script:BackupDir = Join-Path $migDir "registry-backup-$stamp"
-        $logDir = Join-Path $env:TEMP 'WindowsTransferTool\logs'          # designated log folder; a desktop shortcut points here
-        New-Item -ItemType Directory -Force $logDir, $script:BackupDir | Out-Null
-        try {
-            $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Transfer logs.lnk'
-            $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $sc.TargetPath = $logDir; $sc.Save()
-        } catch { Write-Warn "Could not create the desktop shortcut to the logs ($($_.Exception.Message)). Logs are in $logDir" }
-        $script:RoboLog = Join-Path $logDir "robocopy-$stamp.log"
-        try { Start-Transcript -Path (Join-Path $logDir "transfer-$stamp.log") | Out-Null; $script:Transcribing = $true } catch {}
+        New-Item -ItemType Directory -Force $script:BackupDir | Out-Null
+        $script:RoboLog = Join-Path $script:LogDir "robocopy-$stamp.log"
 
         foreach ($st in $StageNames) {
             Write-Stage $codes[$st] $st
@@ -1640,9 +1634,9 @@ function Start-DestinationMode {
         $results | Format-Table -Property Stage, Item, Status, Notes -AutoSize -Wrap | Out-Host
         $summary = ('{0} OK, {1} SKIPPED, {2} WARN, {3} FAILED' -f @($results | Where-Object Status -eq 'OK').Count, @($results | Where-Object Status -eq 'SKIPPED').Count, @($results | Where-Object Status -eq 'WARN').Count, @($results | Where-Object Status -eq 'FAILED').Count)
         Write-Host $summary -ForegroundColor White
-        Write-Host "Logs and registry backups: $migDir" -ForegroundColor Gray
+        Write-Host "Registry backups and reports: $migDir" -ForegroundColor Gray
+        Write-Host "Debug logs: $script:LogDir" -ForegroundColor Gray
         Write-Host 'Tip: install anything missing from the app list, then re-run with -Select s_taskbar to pin it.' -ForegroundColor Gray
-        if ($script:Transcribing) { try { Stop-Transcript | Out-Null } catch {}; $script:Transcribing = $false }
 
         if ($DryRun) {
             if ($script:Transport -eq 'Drive') { Write-Host 'Dry run complete. Nothing was copied or changed; run again without -DryRun for the real transfer.' -ForegroundColor Gray }
@@ -1660,7 +1654,6 @@ function Start-DestinationMode {
     }
     finally {
         if ($script:ShellStopped) { Start-Shell }
-        if ($script:Transcribing) { try { Stop-Transcript | Out-Null } catch {} }
         if ($share) { Disconnect-OldPC $share }
         # The staging folder holds the old PC's Wi-Fi keys in clear text: never leave it behind.
         if ($script:Staging -and (Test-Path -LiteralPath $script:Staging)) { Remove-Item -LiteralPath $script:Staging -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1692,6 +1685,32 @@ if (-not $Mode) {
     $Mode = if ($c -eq '1') { 'Source' } elseif ($c -eq '2') { 'Destination' } else { throw 'Cancelled.' }
 }
 
-if ($Mode -eq 'Source') {
-    if ($Transport -eq 'Drive') { Start-DriveSourceMode } else { Start-SourceMode }
-} else { Start-DestinationMode }
+# Debug log: always on, both PCs. A full transcript goes to a fixed folder in %TEMP%, and a desktop shortcut points at it.
+function Start-DebugLog {
+    $script:LogDir = Join-Path $env:TEMP 'WindowsTransferTool\logs'
+    try {
+        New-Item -ItemType Directory -Force $script:LogDir | Out-Null
+        Start-Transcript -Path (Join-Path $script:LogDir ('debug-{0}-{1}.log' -f $Mode.ToLower(), (Get-Date -Format 'yyyyMMdd-HHmmss'))) | Out-Null
+        $script:Transcribing = $true
+        Write-Host "Debug log: $script:LogDir" -ForegroundColor DarkGray
+    } catch { Write-Warn "Could not start the debug log in $($script:LogDir): $($_.Exception.Message)" }
+    try {
+        $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Transfer logs.lnk'
+        if (-not (Test-Path -LiteralPath $lnk)) {
+            $make = $Yes -or -not (Test-Interactive) -or ((Read-Host '  Put a "Transfer logs" shortcut on the desktop? (Y/n)') -notmatch '^n')
+            if ($make) {
+                $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $sc.TargetPath = $script:LogDir; $sc.Save()
+                Write-Ok "Shortcut created: $lnk"
+            }
+        }
+    } catch { Write-Warn "Could not create the desktop shortcut ($($_.Exception.Message)). Logs are in $($script:LogDir)" }
+}
+
+Start-DebugLog
+try {
+    if ($Mode -eq 'Source') {
+        if ($Transport -eq 'Drive') { Start-DriveSourceMode } else { Start-SourceMode }
+    } else { Start-DestinationMode }
+} finally {
+    if ($script:Transcribing) { try { Stop-Transcript | Out-Null } catch {}; $script:Transcribing = $false }
+}
