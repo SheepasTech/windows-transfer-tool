@@ -37,11 +37,23 @@ At the start of each run the tool looks for "Transfer logs.lnk" on the desktop.
 The bootstrap (bootstrap.ps1) prints "Running: Migrate-Windows.ps1 -Mode ..." with the
 exact parameters it passes to the tool. That line is part of the transcript.
 
-Privacy: read before sending a log to anyone
+Privacy: secrets are hashed in the saved log
 --------------------------------------------
-A transcript records everything printed on screen. On the old PC this includes the
-one-time sign-in details the tool displays for the new PC (the temporary account and
-password for SMB, the FTPS/FTP password, and the pairing code). Those values stop
-working when the old PC finishes or cleans up, but the log still contains them. Delete
-the files in the logs folder when you are done, and do not post them unredacted.
-Saved Wi-Fi passwords are not printed, so they are not in the logs.
+The old PC prints one-time sign-in details on screen for you to type on the new PC
+(pairing code, FTPS/FTP password, SMB temporary-account password). The screen still shows
+them in full. When the tool ends, it rewrites the saved debug log and replaces each of
+those values with a short SHA-256 hash, for example:
+
+  Pairing code:   [sha256:4981aa0a50d5]
+
+So a log you keep or share does not hold a usable password. The hash lets you check that
+two lines refer to the same value, nothing more. A short value such as a 6-digit code
+could be guessed from its hash, but it stops working when the old PC finishes.
+
+Limits:
+  - The rewrite happens when the tool exits. If the window is killed or the PC loses
+    power during a run, the log in the folder still holds the plain values. Delete it.
+  - Only values the tool itself prints as secrets are hashed. Do not paste other
+    sensitive data into the console during a run.
+  - Saved Wi-Fi passwords are written to files in the export package, never printed, so
+    they are not in the log.

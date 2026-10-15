@@ -243,6 +243,9 @@ function New-FtpPassword {
     try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     return (-join ($bytes | ForEach-Object { $alphabet[$_ % 32] }))
 }
+# Secrets shown on screen are recorded here and replaced by a SHA-256 prefix in the saved debug log (Hide-LogSecrets).
+$script:LogSecrets = @()
+function Protect-LogSecret { param([string]$Shown, [string[]]$Also = @()); foreach ($s in @($Shown) + $Also) { if ($s) { $script:LogSecrets += $s } }; return $Shown }
 function Format-FtpPassword([string]$Pw) { return ($Pw -replace '(.{4})(?=.)', '$1-') }
 function ConvertFrom-TypedFtpPassword([string]$Typed) { return (($Typed -replace '[\s-]', '').ToUpperInvariant()) }
 # First 32 hex digits (128 bits) in groups of four - short enough to compare by eye.
@@ -962,9 +965,10 @@ function Start-SourceMode {
         Write-Host '   Address(es) of this PC:' -ForegroundColor White
         Get-IPv4List | ForEach-Object { Write-Host "     $_" -ForegroundColor White }
         if ($ftp) { Write-Host ('   Port:           {0}{1}' -f $FtpPort, $(if ($FtpPort -ne 2121) { "   (add -FtpPort $FtpPort on the new PC)" } else { '' })) -ForegroundColor White }
+        [void](Protect-LogSecret ("{0} {1}" -f $pair.Code.Substring(0, 3), $pair.Code.Substring(3)) $pair.Code)
         Write-Host ('   Pairing code:   {0} {1}' -f $pair.Code.Substring(0, 3), $pair.Code.Substring(3)) -ForegroundColor Green
         if ($ftp) {
-            Write-Host ('   Password:       {0}' -f (Format-FtpPassword $ftp.Password)) -ForegroundColor Green
+            Write-Host ('   Password:       {0}' -f (Protect-LogSecret (Format-FtpPassword $ftp.Password) $ftp.Password)) -ForegroundColor Green
             if ($ftp.Fingerprint) {
                 Write-Host ('   Fingerprint:    {0}' -f (Format-Fingerprint $ftp.Fingerprint)) -ForegroundColor Green
                 Write-Host '   The new PC shows the certificate fingerprint it sees; confirm it matches this one.' -ForegroundColor DarkGray
@@ -975,7 +979,7 @@ function Start-SourceMode {
         } elseif ($account) {
             Write-Host '   Sign in there with this temporary account (not your Microsoft account):' -ForegroundColor White
             Write-Host ('     User name:  {0}' -f $account.Name) -ForegroundColor Green
-            Write-Host ('     Password:   {0}' -f $account.Password) -ForegroundColor Green
+            Write-Host ('     Password:   {0}' -f (Protect-LogSecret $account.Password)) -ForegroundColor Green
             Write-Host '   It is deleted automatically when this finishes - it is not your sign-in account and grants no access beyond this transfer.' -ForegroundColor DarkGray
         } else {
             Write-Host "   Sign in there with this PC's user name and password ($env:USERNAME)." -ForegroundColor White
@@ -1686,12 +1690,24 @@ if (-not $Mode) {
 }
 
 # Debug log: always on, both PCs. A full transcript goes to a fixed folder in %TEMP%, and a desktop shortcut points at it.
+function Hide-LogSecrets {
+    if (-not $script:LogFile -or -not (Test-Path -LiteralPath $script:LogFile) -or $script:LogSecrets.Count -eq 0) { return }
+    try {
+        $txt = [IO.File]::ReadAllText($script:LogFile); $sha = [Security.Cryptography.SHA256]::Create()
+        foreach ($s in ($script:LogSecrets | Select-Object -Unique | Sort-Object { $_.Length } -Descending)) {
+            $h = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($s))[0..5] | ForEach-Object { $_.ToString('x2') })
+            $txt = $txt.Replace($s, "[sha256:$h]")
+        }
+        [IO.File]::WriteAllText($script:LogFile, $txt, (New-Object Text.UTF8Encoding $true))
+    } catch { Write-Warn "Could not hash the secrets in the debug log: $($_.Exception.Message). Delete $($script:LogFile) before sharing it." }
+}
 function Start-DebugLog {
     $script:LogDir = Join-Path $env:TEMP 'WindowsTransferTool\logs'
     try {
         New-Item -ItemType Directory -Force $script:LogDir | Out-Null
-        Start-Transcript -Path (Join-Path $script:LogDir ('debug-{0}-{1}.log' -f $Mode.ToLower(), (Get-Date -Format 'yyyyMMdd-HHmmss'))) | Out-Null
-        $script:Transcribing = $true
+        $tp = Join-Path $script:LogDir ('debug-{0}-{1}.log' -f $Mode.ToLower(), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Start-Transcript -Path $tp | Out-Null
+        $script:LogFile = $tp; $script:Transcribing = $true
         Write-Host "Debug log: $script:LogDir" -ForegroundColor DarkGray
     } catch { Write-Warn "Could not start the debug log in $($script:LogDir): $($_.Exception.Message)" }
     try {
@@ -1713,4 +1729,5 @@ try {
     } else { Start-DestinationMode }
 } finally {
     if ($script:Transcribing) { try { Stop-Transcript | Out-Null } catch {}; $script:Transcribing = $false }
+    Hide-LogSecrets
 }
