@@ -50,7 +50,8 @@ Param(
     [ValidateRange(1,65535)][int]$FtpPort = 2121,                          # both PCs: control port of the FTP(S) service
     [string]$Fingerprint,                    # NEW PC, Ftps: expected certificate SHA-256 (first 32+ hex digits) instead of confirming by eye
     [string]$CredentialFile = $(if ($PSScriptRoot) { Join-Path $PSScriptRoot 'credentials.json' } else { Join-Path (Get-Location) 'credentials.json' }),
-    [int]$Threads = 8                        # robocopy threads
+    [int]$Threads = 8,                       # robocopy threads
+    [string]$RunId                           # set by the bootstrap so its windows and the tool log into one folder
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1793,7 +1794,8 @@ function Hide-LogSecrets {
 function Start-DebugLog {
     $debugRoot = Join-Path (Get-LongTempPath) 'Debug'   # Temp\Debug\<project>\<date>\<file>
     $projectLogs = Join-Path $debugRoot 'WindowsTransferTool'
-    $script:LogDir = Join-Path $projectLogs (Get-Date -Format 'yyyy-MM-dd')
+    $runDir = if ($RunId) { $RunId } else { Get-Date -Format 'yyyy-MM-dd_HH-mm-ss' }       # Temp\Debug\<tool>\<run>\<file>
+    $script:LogDir = Join-Path $projectLogs $runDir
     try {
         New-Item -ItemType Directory -Force $script:LogDir | Out-Null
         $tp = Join-Path $script:LogDir ('debug-{0}-{1}.log' -f $Mode.ToLower(), (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))

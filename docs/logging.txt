@@ -5,9 +5,11 @@ Debug logging is always on. It cannot be switched off, on the old PC or the new 
 
 Where the logs are
 ------------------
-  %TEMP%\Debug\WindowsTransferTool\<yyyy-MM-dd>\<file>
-  (usually C:\Users\<you>\AppData\Local\Temp\Debug\WindowsTransferTool\2026-10-15\debug-source-....log)
-  One folder per day, one new file per run.
+  %TEMP%\Debug\WindowsTransferTool\<run>\<file>
+  <run> is the start time of that one run: yyyy-MM-dd_HH-mm-ss, for example 2026-10-15_14-30-05.
+  One folder per run. The first window, the elevated (UAC) window and the tool itself all
+  write into the same <run> folder; the bootstrap passes the run id on (WTT_RUNID / -RunId).
+  Running Migrate-Windows.ps1 directly makes its own <run> folder.
 
 What is written there
 ---------------------
@@ -81,7 +83,8 @@ in try/catch; if the log folder cannot be written, the tool still runs and only 
 Convention for other tools (e.g. the Office install tool)
 ---------------------------------------------------------
 Use the same layout so one shortcut finds everything:
-  Log files:  %TEMP%\Debug\<ProjectName>\<yyyy-MM-dd>\<kind>-<yyyy-MM-dd_HH-mm-ss>.log
+  Log files:  %TEMP%\Debug\<ProjectName>\<run: yyyy-MM-dd_HH-mm-ss>\<kind>-<yyyy-MM-dd_HH-mm-ss>.log
+              (one folder per run, shared by every window the run opens)
   Shortcut:   Desktop\Debug.lnk  ->  %TEMP%\Debug   (shared by all projects; ask before creating)
   One file per process/window; elevated and nested windows write their own files.
   Append line by line, or use a transcript, so a crash keeps what was written.

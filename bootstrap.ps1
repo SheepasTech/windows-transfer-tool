@@ -53,10 +53,13 @@ function Get-LongTempPath {
     return $env:TEMP
 }
 # Bootstrap log: every window (the first one and the elevated one) writes its own file, one line at a time, so a crash
-# or a closed window still leaves everything up to that point. Layout: Temp\Debug\<project>\<date>\<file>.
+# or a closed window still leaves everything up to that point. Layout: Temp\Debug\<tool>\<run>\<file>, where <run> is
+# this run's own timestamp. The first window, the elevated window and the tool all share the same <run> folder.
+$runId = if ($env:WTT_RUNID) { $env:WTT_RUNID } else { Get-Date -Format 'yyyy-MM-dd_HH-mm-ss' }
+Remove-Item Env:WTT_RUNID -ErrorAction SilentlyContinue      # one-shot: never sticks in a window
 $script:BootLog = $null
 try {
-    $d = Join-Path (Get-LongTempPath) ('Debug\WindowsTransferTool\{0}' -f (Get-Date -Format 'yyyy-MM-dd'))
+    $d = Join-Path (Get-LongTempPath) ('Debug\WindowsTransferTool\{0}' -f $runId)
     New-Item -ItemType Directory -Force $d | Out-Null
     $script:BootLog = Join-Path $d ('bootstrap-{0}-pid{1}-{2}.log' -f $(if (Test-Admin) { 'admin' } else { 'user' }), $PID, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 } catch {}
@@ -127,7 +130,7 @@ if ($role -ne 'Download' -and -not (Test-Admin)) {
     $exe = (Get-Process -Id $PID).Path
     $pre = "`$env:WTT_ROLE='$role'; "
     if ($transport) { $pre += "`$env:WTT_TRANSPORT='$transport'; " }
-    $pre += "`$env:WTT_DRYASKED='1'; "
+    $pre += "`$env:WTT_DRYASKED='1'; `$env:WTT_RUNID='$runId'; "
     if ($wttDry) { $pre += "`$env:WTT_DRYRUN='1'; " }
     foreach ($v in 'WTT_REF','WTT_REPO','WTT_BASE','WTT_FTPPORT','WTT_FINGERPRINT','WTT_DRIVE') {
         $val = [Environment]::GetEnvironmentVariable($v)
@@ -173,7 +176,7 @@ if ($role -eq 'Download') {
     Write-Host "    & '$script' -PrepareDrive D:      # one time: make an external drive a transfer drive"
     return
 }
-$extra = @{}
+$extra = @{ RunId = $runId }
 if ($transport) { $extra.Transport = $transport }
 if ($env:WTT_FTPPORT) { $extra.FtpPort = [int]$env:WTT_FTPPORT }
 if ($env:WTT_DRIVE) { $extra.Drive = $env:WTT_DRIVE }
