@@ -1689,6 +1689,17 @@ if (-not $Mode) {
     $Mode = if ($c -eq '1') { 'Source' } elseif ($c -eq '2') { 'Destination' } else { throw 'Cancelled.' }
 }
 
+# %TEMP% can be an 8.3 short path (C:\Users\ITWORK~1\...) on accounts with a space in the name; expand it so every log call gets a normal path.
+function Get-LongTempPath {
+    try {
+        if (-not ('Wtt.LongPath' -as [type])) {
+            Add-Type -Namespace Wtt -Name LongPath -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern uint GetLongPathName(string s, System.Text.StringBuilder b, uint n);'
+        }
+        $sb = New-Object System.Text.StringBuilder 520
+        if ([Wtt.LongPath]::GetLongPathName($env:TEMP, $sb, 520) -gt 0) { return $sb.ToString() }
+    } catch {}
+    return $env:TEMP
+}
 # Debug log: always on, both PCs. A full transcript goes to a fixed folder in %TEMP%, and a desktop shortcut points at it.
 function Hide-LogSecrets {
     if (-not $script:LogFile -or -not (Test-Path -LiteralPath $script:LogFile) -or $script:LogSecrets.Count -eq 0) { return }
@@ -1702,7 +1713,7 @@ function Hide-LogSecrets {
     } catch { Write-Warn "Could not hash the secrets in the debug log: $($_.Exception.Message). Delete $($script:LogFile) before sharing it." }
 }
 function Start-DebugLog {
-    $debugRoot = Join-Path $env:TEMP 'Debug'   # Temp\Debug\<project>\<date>\<file>
+    $debugRoot = Join-Path (Get-LongTempPath) 'Debug'   # Temp\Debug\<project>\<date>\<file>
     $projectLogs = Join-Path $debugRoot 'WindowsTransferTool'
     $script:LogDir = Join-Path $projectLogs (Get-Date -Format 'yyyy-MM-dd')
     try {

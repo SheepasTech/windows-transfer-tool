@@ -41,11 +41,22 @@ function Test-Admin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# %TEMP% can be an 8.3 short path (C:\Users\ITWORK~1\...) on accounts with a space in the name; expand it so every log call gets a normal path.
+function Get-LongTempPath {
+    try {
+        if (-not ('Wtt.LongPath' -as [type])) {
+            Add-Type -Namespace Wtt -Name LongPath -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern uint GetLongPathName(string s, System.Text.StringBuilder b, uint n);'
+        }
+        $sb = New-Object System.Text.StringBuilder 520
+        if ([Wtt.LongPath]::GetLongPathName($env:TEMP, $sb, 520) -gt 0) { return $sb.ToString() }
+    } catch {}
+    return $env:TEMP
+}
 # Bootstrap log: every window (the first one and the elevated one) writes its own file, one line at a time, so a crash
 # or a closed window still leaves everything up to that point. Layout: Temp\Debug\<project>\<date>\<file>.
 $script:BootLog = $null
 try {
-    $d = Join-Path $env:TEMP ('Debug\WindowsTransferTool\{0}' -f (Get-Date -Format 'yyyy-MM-dd'))
+    $d = Join-Path (Get-LongTempPath) ('Debug\WindowsTransferTool\{0}' -f (Get-Date -Format 'yyyy-MM-dd'))
     New-Item -ItemType Directory -Force $d | Out-Null
     $script:BootLog = Join-Path $d ('bootstrap-{0}-pid{1}-{2}.log' -f $(if (Test-Admin) { 'admin' } else { 'user' }), $PID, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 } catch {}
