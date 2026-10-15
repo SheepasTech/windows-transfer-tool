@@ -1,9 +1,9 @@
 <#
-  Windows Transfer Tool - bootstrap  (branch: drive-transfer)
+  Windows Transfer Tool - bootstrap  (branch: main)
 
   Run on BOTH PCs from a PowerShell window (it asks for administrator rights itself):
 
-    irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/drive-transfer/bootstrap.ps1 | iex
+    irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 
   What it does
     1. Asks whether this PC is the OLD one (source) or the NEW one (destination).
@@ -24,14 +24,14 @@
     $env:WTT_FINGERPRINT = '29BF 5009 ...'                         new PC, FTPS: certificate fingerprint shown on the old PC
     $env:WTT_DRYRUN      = '1'                                     preview only (new PC: nothing copied or changed;
                                                                    old PC with a drive: nothing written to the drive)
-    $env:WTT_REF         = 'v0.4.0' | '<commit sha>'               pin a version (default: drive-transfer, this branch)
+    $env:WTT_REF         = 'v0.4.0' | '<commit sha>'               pin a version (default: main, this branch)
     $env:WTT_REPO        = 'you/windows-transfer-tool'             use a fork
-  Example:  $env:WTT_ROLE='Destination'; $env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/drive-transfer/bootstrap.ps1 | iex
+  Example:  $env:WTT_ROLE='Destination'; $env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 #>
 $ErrorActionPreference = 'Stop'
 
 $Repo       = if ($env:WTT_REPO) { $env:WTT_REPO } else { 'SheepasTech/windows-transfer-tool' }
-$Ref        = if ($env:WTT_REF)  { $env:WTT_REF }  else { 'drive-transfer' }
+$Ref        = if ($env:WTT_REF)  { $env:WTT_REF }  else { 'main' }
 $Base       = if ($env:WTT_BASE) { $env:WTT_BASE } else { "https://raw.githubusercontent.com/$Repo/$Ref/" }
 $InstallDir = Join-Path $env:LOCALAPPDATA 'WindowsTransferTool'
 $Main       = 'Migrate-Windows.ps1'
@@ -74,6 +74,17 @@ if ($role -eq 'Source' -and -not $transport) {
         '4' { $transport = 'Drive' }
         default { $transport = 'Ftps' }
     }
+}
+if ($role -eq 'Destination' -and -not $transport) {
+    Write-Host ''
+    Write-Host '   How does the data reach this PC?'
+    Write-Host '   1) Network - the old PC is waiting (you will be asked for its IP address)'
+    Write-Host '   2) Drive   - a flash drive or external SSD written by the old PC (no IP address needed)'
+    if ((Read-Host '  Choose 1 or 2 (Enter = 1)') -eq '2') { $transport = 'Drive' }
+}
+if (-not $env:WTT_DRYRUN -and ($role -eq 'Destination' -or ($role -eq 'Source' -and $transport -eq 'Drive'))) {
+    Write-Host ''
+    if ((Read-Host '  Dry run first (preview only, nothing is copied or changed)? (y/N)') -match '^y') { $env:WTT_DRYRUN = '1' }
 }
 
 # ---- 2. elevate --------------------------------------------------------------

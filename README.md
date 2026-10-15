@@ -2,7 +2,7 @@
 
 A staged, menu-driven PowerShell tool that moves a Windows user's files, apps and settings from an **old PC** to a **new PC**. The data can travel over the local network (**FTPS**, plain **FTP** or **SMB**) or on a **flash drive or external SSD** with no network at all. No extra software, no cloud: settings travel as `reg.exe` exports, files as `robocopy` or a built-in FTP mirror, apps come back through `winget`.
 
-> **Branch `drive-transfer`.** The one-liners below download this branch's files, not `main`'s (`bootstrap.ps1` defaults `WTT_REF` to `drive-transfer`). This branch builds on `ftp-ftps`, so it contains the FTP/FTPS and SMB transports as well. Everything is tested on one machine in Windows PowerShell 5.1 and PowerShell 7: the FTP/FTPS transport loopback and with `curl`, the drive transport against stand-in folders plus read-only checks of the real USB sticks. **Not yet exercised: writing to a real USB drive, the Windows firewall rule, and a run between two real PCs.** Preview with a dry run first, and keep the old PC until you have checked the new one.
+> **Status.** Everything is tested on one machine in Windows PowerShell 5.1 and PowerShell 7: the FTP/FTPS transport loopback and with `curl`, the drive transport against stand-in folders plus read-only checks of the real USB sticks. **Not yet exercised: writing to a real USB drive, the Windows firewall rule, and a run between two real PCs.** Preview with a dry run first, and keep the old PC until you have checked the new one.
 
 ## Quick start
 
@@ -10,7 +10,7 @@ On **both** PCs, open PowerShell (Start, type `powershell`, Enter) and paste:
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/drive-transfer/bootstrap.ps1 | iex
+irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 ```
 
 `-Scope Process` lifts the script policy for this PowerShell window only. It is not saved and reverts when you close the window.
@@ -28,7 +28,7 @@ To preview on the new PC without changing anything:
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-$env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/drive-transfer/bootstrap.ps1 | iex
+$env:WTT_DRYRUN='1'; irm https://raw.githubusercontent.com/SheepasTech/windows-transfer-tool/main/bootstrap.ps1 | iex
 ```
 
 Offline alternative: copy the **whole folder** (the `lib` folder is needed for FTP/FTPS) to both PCs and double-click `Start-Migration.cmd`, or from an elevated PowerShell run `.\Migrate-Windows.ps1 -Mode Source` / `-Mode Destination`.
@@ -168,7 +168,7 @@ With FTPS the new PC also **pins the server certificate**. The certificate is se
 | `WTT_FTPPORT=2121` | `-FtpPort <n>` | both | Control port of the FTP(S) service. Change it on both PCs if 2121 is taken |
 | `WTT_FINGERPRINT=<hex>` | `-Fingerprint <hex>` | new | FTPS: expected certificate fingerprint (first 32+ hex digits, any spacing) instead of confirming by eye |
 | `WTT_DRYRUN=1` | `-DryRun` | new, or old with a drive | New PC: show what would be copied, change nothing. Old PC with a drive: measure and plan, write nothing to the drive (except the `WTT-Transfer` folder, if you ask the tool to create it) |
-| `WTT_REF=<branch, tag or sha>` | | both | Pin a version instead of `drive-transfer` |
+| `WTT_REF=<branch, tag or sha>` | | both | Pin a version instead of `main` |
 | `WTT_REPO=<owner/repo>` | | both | Use a fork |
 | | `-OldPCIP <ip>` | new | Skip the IP prompt |
 | | `-PairCode 123456` | new | Skip the pairing-code prompt |

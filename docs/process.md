@@ -20,16 +20,16 @@ There are four ways for the data to reach the new PC, chosen on the old PC: **FT
 sequenceDiagram
     autonumber
     actor U as You
-    participant G as GitHub (raw, branch drive-transfer)
+    participant G as GitHub (raw, branch main)
     participant O as OLD PC
     participant N as NEW PC
 
-    U->>O: irm .../drive-transfer/bootstrap.ps1 | iex
+    U->>O: irm .../main/bootstrap.ps1 | iex
     O->>O: ask role (old PC) and transfer method, elevate (UAC)
     O->>G: GET Migrate-Windows.ps1 and lib/WttFtp.cs
     G-->>O: both files (the script is parsed, both are hashed)
     O->>O: -Mode Source  (S1..S4) shows IP, port, pairing code, password, fingerprint
-    U->>N: irm .../drive-transfer/bootstrap.ps1 | iex
+    U->>N: irm .../main/bootstrap.ps1 | iex
     N->>N: ask role (new PC), elevate (UAC)
     N->>G: GET Migrate-Windows.ps1 and lib/WttFtp.cs
     G-->>N: both files
