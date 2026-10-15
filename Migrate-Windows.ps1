@@ -1702,7 +1702,8 @@ function Hide-LogSecrets {
     } catch { Write-Warn "Could not hash the secrets in the debug log: $($_.Exception.Message). Delete $($script:LogFile) before sharing it." }
 }
 function Start-DebugLog {
-    $script:LogDir = Join-Path $env:TEMP 'WindowsTransferTool\logs'
+    $projectLogs = Join-Path $env:TEMP 'Debug\WindowsTransferTool'                 # Temp\Debug\<project>\<date>\<file>
+    $script:LogDir = Join-Path $projectLogs (Get-Date -Format 'yyyy-MM-dd')
     try {
         New-Item -ItemType Directory -Force $script:LogDir | Out-Null
         $tp = Join-Path $script:LogDir ('debug-{0}-{1}.log' -f $Mode.ToLower(), (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -1711,11 +1712,13 @@ function Start-DebugLog {
         Write-Host "Debug log: $script:LogDir" -ForegroundColor DarkGray
     } catch { Write-Warn "Could not start the debug log in $($script:LogDir): $($_.Exception.Message)" }
     try {
-        $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Transfer logs.lnk'
+        $lnkDir = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Debug'
+        $lnk = Join-Path $lnkDir 'WindowsTransferTool logs.lnk'
         if (-not (Test-Path -LiteralPath $lnk)) {
-            $make = $Yes -or -not (Test-Interactive) -or ((Read-Host '  Put a "Transfer logs" shortcut on the desktop? (Y/n)') -notmatch '^n')
+            $make = $Yes -or -not (Test-Interactive) -or ((Read-Host '  Put a log shortcut in Desktop\Debug? (Y/n)') -notmatch '^n')
             if ($make) {
-                $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $sc.TargetPath = $script:LogDir; $sc.Save()
+                New-Item -ItemType Directory -Force $lnkDir | Out-Null
+                $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $sc.TargetPath = $projectLogs; $sc.Save()
                 Write-Ok "Shortcut created: $lnk"
             }
         }
