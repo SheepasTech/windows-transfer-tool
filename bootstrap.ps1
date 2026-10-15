@@ -82,11 +82,16 @@ if ($role -eq 'Destination' -and -not $transport) {
     Write-Host '   2) Drive   - a flash drive or external SSD written by the old PC (no IP address needed)'
     if ((Read-Host '  Choose 1 or 2 (Enter = 1)') -eq '2') { $transport = 'Drive' }
 }
+# WTT_DRYRUN only sets the default answer; it is cleared here so it never sticks in this window, and the question is always asked.
 $wttDry = [bool]($env:WTT_DRYRUN -and $env:WTT_DRYRUN -ne '0')
-if (-not $wttDry -and ($role -eq 'Destination' -or ($role -eq 'Source' -and $transport -eq 'Drive'))) {
+Remove-Item Env:WTT_DRYRUN -ErrorAction SilentlyContinue
+if (-not $env:WTT_DRYASKED -and ($role -eq 'Destination' -or ($role -eq 'Source' -and $transport -eq 'Drive'))) {
     Write-Host ''
-    if ((Read-Host '  Dry run first (preview only, nothing is copied or changed)? (y/N)') -match '^y') { $wttDry = $true }
+    $hint = if ($wttDry) { 'Y/n' } else { 'y/N' }
+    $ans = Read-Host ("  Dry run first (preview only, nothing is copied or changed)? ($hint)")
+    $wttDry = if ($ans) { $ans -match '^y' } else { $wttDry }
 }
+Remove-Item Env:WTT_DRYASKED -ErrorAction SilentlyContinue     # one-shot: the elevated window must not skip the question on its next run
 
 # ---- 2. elevate --------------------------------------------------------------
 if ($role -ne 'Download' -and -not (Test-Admin)) {
@@ -94,7 +99,8 @@ if ($role -ne 'Download' -and -not (Test-Admin)) {
     $exe = (Get-Process -Id $PID).Path
     $pre = "`$env:WTT_ROLE='$role'; "
     if ($transport) { $pre += "`$env:WTT_TRANSPORT='$transport'; " }
-    if ($wttDry) { $pre += "`$env:WTT_DRYRUN='1'; " } else { $pre += "Remove-Item Env:WTT_DRYRUN -ErrorAction SilentlyContinue; " }
+    $pre += "`$env:WTT_DRYASKED='1'; "
+    if ($wttDry) { $pre += "`$env:WTT_DRYRUN='1'; " }
     foreach ($v in 'WTT_REF','WTT_REPO','WTT_BASE','WTT_FTPPORT','WTT_FINGERPRINT','WTT_DRIVE') {
         $val = [Environment]::GetEnvironmentVariable($v)
         if ($val) { $pre += "`$env:$v='$val'; " }
