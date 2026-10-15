@@ -1144,6 +1144,78 @@ function Get-TargetKnown([string]$Name) {
     }
 }
 
+# =============================================================================
+# winget reinstall: one separate winget process per app, each with its own log, so one crash or hang
+# cannot stop the rest. Up to $WingetParallel run at once; apps that failed are retried once, one at a time
+# (parallel installs can collide on the Windows Installer lock). Logs: <LogDir>\winget\<app id>.log
+# =============================================================================
+function Install-WingetApps {
+    param([string]$ListFile, [int]$Parallel = 3, [int]$TimeoutMin = 30)
+    $winget = (Get-Command winget -ErrorAction SilentlyContinue).Source
+    if (-not $winget) { throw 'winget not found' }
+    $apps = @()
+    try {
+        $j = Get-Content -LiteralPath $ListFile -Raw | ConvertFrom-Json
+        foreach ($s in @($j.Sources)) { foreach ($p in @($s.Packages)) { if ($p.PackageIdentifier) { $apps += [pscustomobject]@{ Id = [string]$p.PackageIdentifier; Source = [string]$s.SourceDetails.Name } } } }
+    } catch { throw "Could not read the winget list ${ListFile}: $($_.Exception.Message)" }
+    $apps = @($apps | Sort-Object Id -Unique)
+    if ($apps.Count -eq 0) { Write-Warn 'The winget list is empty.'; return @() }
+
+    $wgLog = Join-Path $script:LogDir 'winget'
+    try { New-Item -ItemType Directory -Force $wgLog | Out-Null } catch { Write-Warn "Could not create $wgLog ($($_.Exception.Message)); winget output will not be saved." ; $wgLog = $null }
+    try { [void](Invoke-Native $winget @('source', 'update', '--disable-interactivity')) } catch {}
+
+    $start = {
+        param($app)
+        $safe = ($app.Id -replace '[^\w.\-]', '_')
+        $wargs = @('install', '--id', $app.Id, '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+        if ($app.Source) { $wargs += @('--source', $app.Source) }
+        $o = @{ FilePath = $winget; ArgumentList = $wargs; PassThru = $true; WindowStyle = 'Hidden' }
+        if ($wgLog) {
+            $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+            $app | Add-Member -NotePropertyName Log -NotePropertyValue (Join-Path $wgLog "$safe-$stamp.log") -Force
+            $o.RedirectStandardOutput = $app.Log; $o.RedirectStandardError = "$($app.Log).err"
+        }
+        try { $app | Add-Member -NotePropertyName Proc -NotePropertyValue (Start-Process @o) -Force; $app | Add-Member -NotePropertyName Started -NotePropertyValue (Get-Date) -Force }
+        catch { $app | Add-Member -NotePropertyName Proc -NotePropertyValue $null -Force; $app | Add-Member -NotePropertyName Error -NotePropertyValue $_.Exception.Message -Force }
+    }
+    # 0 = installed; -1978335189 (0x8A15002B) = already installed / nothing to do
+    $isOk = { param($code) $code -eq 0 -or $code -eq -1978335189 }
+
+    $results = @{}
+    function Wait-Batch([object[]]$Running) {
+        foreach ($a in $Running) {
+            if (-not $a.Proc) { $results[$a.Id] = @{ Code = $null; Note = "could not start: $($a.Error)"; Log = $a.Log }; continue }
+            if (-not $a.Proc.WaitForExit($TimeoutMin * 60000)) {
+                try { Stop-Process -Id $a.Proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+                $results[$a.Id] = @{ Code = $null; Note = "timed out after $TimeoutMin min (killed)"; Log = $a.Log }
+            } else {
+                $code = $a.Proc.ExitCode
+                $results[$a.Id] = @{ Code = $code; Note = $(if (& $isOk $code) { 'ok' } else { "exit code $code" }); Log = $a.Log }
+            }
+        }
+    }
+
+    Write-Step ("Installing {0} app(s) with winget, up to {1} at a time, one separate process each. Logs: {2}" -f $apps.Count, $Parallel, $(if ($wgLog) { $wgLog } else { '(not saved)' }))
+    $i = 0
+    for ($off = 0; $off -lt $apps.Count; $off += $Parallel) {
+        $batch = @($apps[$off..([Math]::Min($off + $Parallel, $apps.Count) - 1)])
+        foreach ($a in $batch) { $i++; Write-Host ('    [{0}/{1}] {2}' -f $i, $apps.Count, $a.Id) -ForegroundColor Gray; & $start $a }
+        Wait-Batch $batch
+        foreach ($a in $batch) { $r = $results[$a.Id]; $good = ($null -ne $r.Code -and (& $isOk $r.Code)); Write-Host ('        {0}: {1}' -f $a.Id, $r.Note) -ForegroundColor $(if ($good) { 'Green' } else { 'Yellow' }) }
+    }
+    $failed = @($apps | Where-Object { $r = $results[$_.Id]; $null -eq $r.Code -or -not (& $isOk $r.Code) })
+    if ($failed.Count -gt 0) {
+        Write-Step ("Retrying {0} failed app(s), one at a time" -f $failed.Count)
+        foreach ($a in $failed) {
+            & $start $a; Wait-Batch @($a)
+            $r = $results[$a.Id]; $good = ($null -ne $r.Code -and (& $isOk $r.Code))
+            Write-Host ('        {0}: {1}' -f $a.Id, $(if ($good) { 'ok on retry' } else { $r.Note })) -ForegroundColor $(if ($good) { 'Green' } else { 'Yellow' })
+        }
+    }
+    return @($apps | ForEach-Object { $r = $results[$_.Id]; [pscustomobject]@{ Id = $_.Id; Ok = ($null -ne $r.Code -and (& $isOk $r.Code)); Note = $r.Note; Log = $r.Log } })
+}
+
 function Mark([int]$Rank, [string]$Text) {
     if ($Rank -gt $script:Rank) { $script:Rank = $Rank }
     if ($Text) { [void]$script:Notes.Add($Text) }
@@ -1396,8 +1468,14 @@ function Invoke-Special {
             if (-not (Test-Path "$script:Pkg\apps.json")) { Mark 1 'no winget list exported from old PC'; return }
             if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Mark 2 'winget not available on this PC'; return }
             if ($DryRun) { Mark 0 'dry run: no apps installed'; $script:DidWork = $true; return }
-            $rc = Invoke-Native winget @('import','-i',"$script:Pkg\apps.json",'--ignore-unavailable','--accept-package-agreements','--accept-source-agreements','--disable-interactivity') -Show
-            if ($rc -ne 0) { Mark 2 "winget finished with code $rc (some apps may need manual install; see report CSV)" } else { $script:DidWork = $true }
+            try {
+                $wg = @(Install-WingetApps -ListFile "$script:Pkg\apps.json")
+                $bad = @($wg | Where-Object { -not $_.Ok })
+                if ($wg.Count -gt 0) { $script:DidWork = $true }
+                if ($bad.Count -gt 0) {
+                    Mark 2 ("{0} of {1} app(s) failed: {2}. Logs: {3}\winget" -f $bad.Count, $wg.Count, (($bad | ForEach-Object { $_.Id }) -join ', '), $script:LogDir)
+                }
+            } catch { Mark 2 "winget step failed: $($_.Exception.Message). See the debug log in $script:LogDir" }
         }
         'd_vscode' {
             $f = "$script:Pkg\vscode-extensions.txt"

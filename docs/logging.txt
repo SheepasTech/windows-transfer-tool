@@ -87,3 +87,17 @@ Use the same layout so one shortcut finds everything:
   Append line by line, or use a transcript, so a crash keeps what was written.
   Hash any secret that is printed (see the privacy section above).
   Never let logging stop the tool: wrap every log call in try/catch.
+
+winget app installs (new PC)
+----------------------------
+The "Reinstall apps with winget" item no longer runs one `winget import` for everything.
+It reads apps.json and starts one separate, hidden winget process per app:
+  - up to 3 run at the same time (Install-WingetApps -Parallel);
+  - each app has its own log: <log folder>\winget\<app id>-<yyyy-MM-dd_HH-mm-ss>.log
+    (plus a .err file with its error output);
+  - an app that exits with an error, cannot start, or runs longer than 30 minutes
+    (it is killed) is recorded and the others carry on;
+  - failed apps are retried once, one at a time (parallel installs can collide on the
+    Windows Installer lock);
+  - the final report lists the apps that still failed and where their logs are.
+Exit code 0 and 0x8A15002B (already installed) count as success.
