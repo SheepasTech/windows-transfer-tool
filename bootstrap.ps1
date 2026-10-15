@@ -82,10 +82,10 @@ if ($role -eq 'Destination' -and -not $transport) {
     Write-Host '   2) Drive   - a flash drive or external SSD written by the old PC (no IP address needed)'
     if ((Read-Host '  Choose 1 or 2 (Enter = 1)') -eq '2') { $transport = 'Drive' }
 }
-$dryRun = [bool]($env:WTT_DRYRUN -and $env:WTT_DRYRUN -ne '0')
-if (-not $dryRun -and ($role -eq 'Destination' -or ($role -eq 'Source' -and $transport -eq 'Drive'))) {
+$wttDry = [bool]($env:WTT_DRYRUN -and $env:WTT_DRYRUN -ne '0')
+if (-not $wttDry -and ($role -eq 'Destination' -or ($role -eq 'Source' -and $transport -eq 'Drive'))) {
     Write-Host ''
-    if ((Read-Host '  Dry run first (preview only, nothing is copied or changed)? (y/N)') -match '^y') { $dryRun = $true }
+    if ((Read-Host '  Dry run first (preview only, nothing is copied or changed)? (y/N)') -match '^y') { $wttDry = $true }
 }
 
 # ---- 2. elevate --------------------------------------------------------------
@@ -94,7 +94,7 @@ if ($role -ne 'Download' -and -not (Test-Admin)) {
     $exe = (Get-Process -Id $PID).Path
     $pre = "`$env:WTT_ROLE='$role'; "
     if ($transport) { $pre += "`$env:WTT_TRANSPORT='$transport'; " }
-    if ($dryRun) { $pre += "`$env:WTT_DRYRUN='1'; " } else { $pre += "Remove-Item Env:WTT_DRYRUN -ErrorAction SilentlyContinue; " }
+    if ($wttDry) { $pre += "`$env:WTT_DRYRUN='1'; " } else { $pre += "Remove-Item Env:WTT_DRYRUN -ErrorAction SilentlyContinue; " }
     foreach ($v in 'WTT_REF','WTT_REPO','WTT_BASE','WTT_FTPPORT','WTT_FINGERPRINT','WTT_DRIVE') {
         $val = [Environment]::GetEnvironmentVariable($v)
         if ($val) { $pre += "`$env:$v='$val'; " }
@@ -140,7 +140,8 @@ $extra = @{}
 if ($transport) { $extra.Transport = $transport }
 if ($env:WTT_FTPPORT) { $extra.FtpPort = [int]$env:WTT_FTPPORT }
 if ($env:WTT_DRIVE) { $extra.Drive = $env:WTT_DRIVE }
-if ($dryRun -and ($role -eq 'Destination' -or $transport -eq 'Drive')) { $extra.DryRun = $true }     # the network old-PC flow has no dry run
+if ($wttDry -and ($role -eq 'Destination' -or $transport -eq 'Drive')) { $extra.DryRun = $true }     # the network old-PC flow has no dry run
 if ($env:WTT_FINGERPRINT -and $role -eq 'Destination') { $extra.Fingerprint = $env:WTT_FINGERPRINT }
 Write-Host ("  Starting {0} mode..." -f $role) -ForegroundColor White
+Write-Host ("  Running: Migrate-Windows.ps1 -Mode {0} {1}" -f $role, (($extra.GetEnumerator() | ForEach-Object { if ($_.Value -is [bool]) { "-$($_.Key)" } else { "-$($_.Key) $($_.Value)" } }) -join " ")) -ForegroundColor DarkGray
 & $script -Mode $role @extra
