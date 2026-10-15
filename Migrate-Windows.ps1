@@ -1150,8 +1150,34 @@ function Get-TargetKnown([string]$Name) {
 # cannot stop the rest. Up to $WingetParallel run at once; apps that failed are retried once, one at a time
 # (parallel installs can collide on the Windows Installer lock). Logs: <LogDir>\winget\<app id>.log
 # =============================================================================
+# Reads one app's winget output (stdout + stderr files) and says what happened and why, in plain words.
+# Returns Ok, Retry (worth trying again) and Reason. Order matters: the most specific causes come first.
+function Get-WingetOutcome {
+    param($Code, [string]$LogFile, [bool]$TimedOut)
+    $text = ''
+    foreach ($f in @($LogFile, "$LogFile.err")) { if ($f -and (Test-Path -LiteralPath $f)) { try { $text += (Get-Content -LiteralPath $f -Raw -ErrorAction Stop) + "`n" } catch {} } }
+    # winget redraws spinners and progress bars; keep only the lines a person would read
+    $lines = @($text -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^[\s\-\\|/]+$' -and $_ -notmatch ('[' + [char]0x2588 + [char]0x2592 + ']') -and $_ -notmatch '^\d+(\.\d+)?\s*[KMG]B\s*/' })
+    $tail = @($lines | Select-Object -Last 3)
+    $hex = if ($null -ne $Code) { '0x{0:X8}' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$Code), 0) } else { 'unknown' }
+    $r = @{ Ok = $false; Retry = $false; Reason = ''; Tail = $tail; Hex = $hex }
+    if ($TimedOut)                                        { $r.Reason = 'timed out and was stopped - it was most likely waiting on a prompt (source or package agreement) or a hung installer'; return $r }
+    if ($text -match '(?i)successfully installed')         { $r.Ok = $true; $r.Reason = 'installed'; return $r }
+    if ($text -match '(?i)already installed|no available upgrade|no newer package versions|existing package already installed') { $r.Ok = $true; $r.Reason = 'already installed on this PC'; return $r }
+    if ($Code -eq 0)                                      { $r.Ok = $true; $r.Reason = 'installed'; return $r }
+    if ($text -match '(?i)hash does not match')            { $r.Reason = "the vendor's installer no longer matches winget's checksum (the package is out of date and cannot be overridden as admin) - install it from the vendor's site"; return $r }
+    if ($text -match '(?i)no package found|no installed package found') { $r.Reason = 'winget has no package with this id any more'; return $r }
+    if ($text -match '(?i)agreements?.*(accept|required)|do you agree|\[Y\] Yes|\(Y/N\)') { $r.Reason = 'winget wanted an agreement to be accepted'; $r.Retry = $true; return $r }
+    if ($text -match '(?i)another installation is already in progress|1618') { $r.Reason = 'Windows Installer was busy with another install'; $r.Retry = $true; return $r }
+    if ($text -match '(?i)installer failed with exit code:\s*(\d+)') { $r.Reason = "the app's own installer failed (installer exit code $($Matches[1]))"; $r.Retry = $true; return $r }
+    if ($text -match '(?i)download.*(fail|error)|failed when|could not connect|network|timed? ?out|0x8a150008') { $r.Reason = 'the download failed (network or the vendor server)'; $r.Retry = $true; return $r }
+    if ($text -match '(?i)requires.*(restart|reboot)|reboot')  { $r.Ok = $true; $r.Reason = 'installed - a restart is needed to finish'; return $r }
+    $r.Reason = "winget failed with code $hex"; $r.Retry = $true
+    return $r
+}
+
 function Install-WingetApps {
-    param([string]$ListFile, [int]$Parallel = 3, [int]$TimeoutMin = 30)
+    param([string]$ListFile, [int]$Parallel = 3, [int]$TimeoutMin = 15)
     $winget = (Get-Command winget -ErrorAction SilentlyContinue).Source
     if (-not $winget) { throw 'winget not found' }
     $apps = @()
@@ -1164,7 +1190,8 @@ function Install-WingetApps {
 
     $wgLog = Join-Path $script:LogDir 'winget'
     try { New-Item -ItemType Directory -Force $wgLog | Out-Null } catch { Write-Warn "Could not create $wgLog ($($_.Exception.Message)); winget output will not be saved." ; $wgLog = $null }
-    try { [void](Invoke-Native $winget @('source', 'update', '--disable-interactivity')) } catch {}
+    # Accept the source agreements once, up front, so no install sits waiting on that prompt.
+    try { [void](Invoke-Native $winget @('source', 'update', '--accept-source-agreements', '--disable-interactivity')) } catch {}
 
     $start = {
         param($app)
@@ -1172,28 +1199,42 @@ function Install-WingetApps {
         $wargs = @('install', '--id', $app.Id, '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
         if ($app.Source) { $wargs += @('--source', $app.Source) }
         $o = @{ FilePath = $winget; ArgumentList = $wargs; PassThru = $true; WindowStyle = 'Hidden' }
+        $app | Add-Member -NotePropertyName Log -NotePropertyValue $null -Force
         if ($wgLog) {
-            $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
-            $app | Add-Member -NotePropertyName Log -NotePropertyValue (Join-Path $wgLog "$safe-$stamp.log") -Force
+            $app.Log = Join-Path $wgLog ('{0}-{1}.log' -f $safe, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
             $o.RedirectStandardOutput = $app.Log; $o.RedirectStandardError = "$($app.Log).err"
         }
-        try { $app | Add-Member -NotePropertyName Proc -NotePropertyValue (Start-Process @o) -Force; $app | Add-Member -NotePropertyName Started -NotePropertyValue (Get-Date) -Force }
-        catch { $app | Add-Member -NotePropertyName Proc -NotePropertyValue $null -Force; $app | Add-Member -NotePropertyName Error -NotePropertyValue $_.Exception.Message -Force }
+        try {
+            $p = Start-Process @o
+            $null = $p.Handle          # keep the process handle: without it ExitCode comes back empty once the process has ended
+            $app | Add-Member -NotePropertyName Proc -NotePropertyValue $p -Force
+            $app | Add-Member -NotePropertyName StartError -NotePropertyValue $null -Force
+        } catch {
+            $app | Add-Member -NotePropertyName Proc -NotePropertyValue $null -Force
+            $app | Add-Member -NotePropertyName StartError -NotePropertyValue $_.Exception.Message -Force
+        }
     }
-    # 0 = installed; -1978335189 (0x8A15002B) = already installed / nothing to do
-    $isOk = { param($code) $code -eq 0 -or $code -eq -1978335189 }
 
     $results = @{}
     function Wait-Batch([object[]]$Running) {
         foreach ($a in $Running) {
-            if (-not $a.Proc) { $results[$a.Id] = @{ Code = $null; Note = "could not start: $($a.Error)"; Log = $a.Log }; continue }
-            if (-not $a.Proc.WaitForExit($TimeoutMin * 60000)) {
-                try { Stop-Process -Id $a.Proc.Id -Force -ErrorAction SilentlyContinue } catch {}
-                $results[$a.Id] = @{ Code = $null; Note = "timed out after $TimeoutMin min (killed)"; Log = $a.Log }
-            } else {
-                $code = $a.Proc.ExitCode
-                $results[$a.Id] = @{ Code = $code; Note = $(if (& $isOk $code) { 'ok' } else { "exit code $code" }); Log = $a.Log }
-            }
+            if (-not $a.Proc) { $results[$a.Id] = @{ Ok = $false; Retry = $false; Reason = "could not start winget: $($a.StartError)"; Tail = @(); Hex = 'n/a'; Log = $a.Log }; continue }
+            $timedOut = -not $a.Proc.WaitForExit($TimeoutMin * 60000)
+            if ($timedOut) { try { Stop-Process -Id $a.Proc.Id -Force -ErrorAction SilentlyContinue } catch {} }
+            else { try { $a.Proc.WaitForExit(); $a.Proc.Refresh() } catch {} }
+            $code = if ($timedOut) { $null } else { try { $a.Proc.ExitCode } catch { $null } }
+            $o = Get-WingetOutcome -Code $code -LogFile $a.Log -TimedOut $timedOut
+            $o.Log = $a.Log; $o.Code = $code
+            $results[$a.Id] = $o
+        }
+    }
+    # What the person sees for each app: the cause in words, plus winget's own last lines when it failed.
+    function Show-Outcome($a, [string]$Prefix = '') {
+        $r = $results[$a.Id]
+        Write-Host ('        {0}{1}: {2}' -f $Prefix, $a.Id, $r.Reason) -ForegroundColor $(if ($r.Ok) { 'Green' } else { 'Yellow' })
+        if (-not $r.Ok) {
+            foreach ($l in $r.Tail) { Write-Host ('            winget: {0}' -f $l) -ForegroundColor DarkGray }
+            if ($r.Log) { Write-Host ('            log: {0}' -f $r.Log) -ForegroundColor DarkGray }
         }
     }
 
@@ -1203,18 +1244,15 @@ function Install-WingetApps {
         $batch = @($apps[$off..([Math]::Min($off + $Parallel, $apps.Count) - 1)])
         foreach ($a in $batch) { $i++; Write-Host ('    [{0}/{1}] {2}' -f $i, $apps.Count, $a.Id) -ForegroundColor Gray; & $start $a }
         Wait-Batch $batch
-        foreach ($a in $batch) { $r = $results[$a.Id]; $good = ($null -ne $r.Code -and (& $isOk $r.Code)); Write-Host ('        {0}: {1}' -f $a.Id, $r.Note) -ForegroundColor $(if ($good) { 'Green' } else { 'Yellow' }) }
+        foreach ($a in $batch) { Show-Outcome $a }
     }
-    $failed = @($apps | Where-Object { $r = $results[$_.Id]; $null -eq $r.Code -or -not (& $isOk $r.Code) })
-    if ($failed.Count -gt 0) {
-        Write-Step ("Retrying {0} failed app(s), one at a time" -f $failed.Count)
-        foreach ($a in $failed) {
-            & $start $a; Wait-Batch @($a)
-            $r = $results[$a.Id]; $good = ($null -ne $r.Code -and (& $isOk $r.Code))
-            Write-Host ('        {0}: {1}' -f $a.Id, $(if ($good) { 'ok on retry' } else { $r.Note })) -ForegroundColor $(if ($good) { 'Green' } else { 'Yellow' })
-        }
+    # Only causes that can change are retried (installer busy, network, prompt). A checksum mismatch or a missing package will not.
+    $retry = @($apps | Where-Object { $r = $results[$_.Id]; -not $r.Ok -and $r.Retry })
+    if ($retry.Count -gt 0) {
+        Write-Step ("Retrying {0} app(s) that failed for a reason that may be temporary, one at a time" -f $retry.Count)
+        foreach ($a in $retry) { & $start $a; Wait-Batch @($a); Show-Outcome $a 'retry: ' }
     }
-    return @($apps | ForEach-Object { $r = $results[$_.Id]; [pscustomobject]@{ Id = $_.Id; Ok = ($null -ne $r.Code -and (& $isOk $r.Code)); Note = $r.Note; Log = $r.Log } })
+    return @($apps | ForEach-Object { $r = $results[$_.Id]; [pscustomobject]@{ Id = $_.Id; Ok = [bool]$r.Ok; Note = $r.Reason; Log = $r.Log } })
 }
 
 function Mark([int]$Rank, [string]$Text) {
@@ -1474,7 +1512,7 @@ function Invoke-Special {
                 $bad = @($wg | Where-Object { -not $_.Ok })
                 if ($wg.Count -gt 0) { $script:DidWork = $true }
                 if ($bad.Count -gt 0) {
-                    Mark 2 ("{0} of {1} app(s) failed: {2}. Logs: {3}\winget" -f $bad.Count, $wg.Count, (($bad | ForEach-Object { $_.Id }) -join ', '), $script:LogDir)
+                    Mark 2 ("{0} of {1} app(s) not installed: {2}. Logs: {3}\winget" -f $bad.Count, $wg.Count, (($bad | ForEach-Object { '{0} ({1})' -f $_.Id, $_.Note }) -join '; '), $script:LogDir)
                 }
             } catch { Mark 2 "winget step failed: $($_.Exception.Message). See the debug log in $script:LogDir" }
         }

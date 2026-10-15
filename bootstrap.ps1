@@ -9,7 +9,7 @@
     1. Asks whether this PC is the OLD one (source) or the NEW one (destination).
        On the old PC it also asks how the data should travel: FTPS, FTP, SMB, or a flash drive / external SSD.
     2. Elevates if needed.
-    3. Downloads Migrate-Windows.ps1 and lib\WttFtp.cs to %LOCALAPPDATA%\WindowsTransferTool and checks them.
+    3. Downloads Migrate-Windows.ps1 and lib\WttFtp.cs to %TEMP%\WindowsTransferTool\scripts\<run> (never AppData) and checks them.
     4. Starts the staged migration for that role (docs/process.md). Over the network the two PCs bind
        to each other with a pairing code. With a drive you carry it from one PC to the other.
 
@@ -33,7 +33,6 @@ $ErrorActionPreference = 'Stop'
 $Repo       = if ($env:WTT_REPO) { $env:WTT_REPO } else { 'SheepasTech/windows-transfer-tool' }
 $Ref        = if ($env:WTT_REF)  { $env:WTT_REF }  else { 'main' }
 $Base       = if ($env:WTT_BASE) { $env:WTT_BASE } else { "https://raw.githubusercontent.com/$Repo/$Ref/" }
-$InstallDir = Join-Path $env:LOCALAPPDATA 'WindowsTransferTool'
 $Main       = 'Migrate-Windows.ps1'
 $Lib        = 'lib/WttFtp.cs'
 
@@ -57,6 +56,7 @@ function Get-LongTempPath {
 # this run's own timestamp. The first window, the elevated window and the tool all share the same <run> folder.
 $runId = if ($env:WTT_RUNID) { $env:WTT_RUNID } else { Get-Date -Format 'yyyy-MM-dd_HH-mm-ss' }
 Remove-Item Env:WTT_RUNID -ErrorAction SilentlyContinue      # one-shot: never sticks in a window
+$InstallDir = Join-Path (Get-LongTempPath) ('WindowsTransferTool\scripts\' + $runId)     # downloaded scripts live in Temp, never directly in AppData
 $script:BootLog = $null
 try {
     $d = Join-Path (Get-LongTempPath) ('Debug\WindowsTransferTool\{0}' -f $runId)

@@ -93,14 +93,26 @@ Use the same layout so one shortcut finds everything:
 
 winget app installs (new PC)
 ----------------------------
-The "Reinstall apps with winget" item no longer runs one `winget import` for everything.
-It reads apps.json and starts one separate, hidden winget process per app:
-  - up to 3 run at the same time (Install-WingetApps -Parallel);
-  - each app has its own log: <log folder>\winget\<app id>-<yyyy-MM-dd_HH-mm-ss>.log
-    (plus a .err file with its error output);
-  - an app that exits with an error, cannot start, or runs longer than 30 minutes
-    (it is killed) is recorded and the others carry on;
-  - failed apps are retried once, one at a time (parallel installs can collide on the
-    Windows Installer lock);
-  - the final report lists the apps that still failed and where their logs are.
-Exit code 0 and 0x8A15002B (already installed) count as success.
+The "Reinstall apps with winget" item reads apps.json and starts one separate, hidden winget
+process per app (3 at a time). Each app has its own log in <run folder>\winget\ (plus .err).
+
+What you see on screen, per app: the CAUSE in words, then winget's own last lines and the
+log path when it failed. The cause comes from winget's output, not just the exit code:
+  already installed on this PC     counts as success (winget exits non-zero for this)
+  installed                        success
+  checksum mismatch                the vendor changed the installer and winget's manifest is
+                                   out of date (Chrome did this); cannot be overridden as
+                                   admin. Install that app from the vendor's site. Not retried.
+  no package with this id          not retried
+  waiting on an agreement          the source agreements are now accepted once up front
+                                   (winget source update --accept-source-agreements); if an
+                                   install still waits, it is stopped after 15 minutes and
+                                   reported as probably waiting on a prompt
+  Windows Installer busy / app's own installer failed / download failed
+                                   retried once, one at a time
+The final report lists only the apps that are really not installed, each with its cause.
+
+Downloaded scripts
+------------------
+bootstrap.ps1 downloads Migrate-Windows.ps1 and lib\WttFtp.cs to
+%TEMP%\WindowsTransferTool\scripts\<run>, not to AppData. <run> is the same run id as the log folder.
