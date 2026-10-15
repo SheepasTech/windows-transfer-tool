@@ -1610,8 +1610,12 @@ function Start-DestinationMode {
         $script:ReportDir = $migDir
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $script:BackupDir = Join-Path $migDir "registry-backup-$stamp"
-        $logDir = Join-Path $migDir 'logs'
+        $logDir = Join-Path $env:TEMP 'WindowsTransferTool\logs'          # designated log folder; a desktop shortcut points here
         New-Item -ItemType Directory -Force $logDir, $script:BackupDir | Out-Null
+        try {
+            $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Transfer logs.lnk'
+            $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk); $sc.TargetPath = $logDir; $sc.Save()
+        } catch { Write-Warn "Could not create the desktop shortcut to the logs ($($_.Exception.Message)). Logs are in $logDir" }
         $script:RoboLog = Join-Path $logDir "robocopy-$stamp.log"
         try { Start-Transcript -Path (Join-Path $logDir "transfer-$stamp.log") | Out-Null; $script:Transcribing = $true } catch {}
 
